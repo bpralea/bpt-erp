@@ -32,7 +32,49 @@ const FACTURI_DEF = [
 const ETAPE    = ["Ofertă","Comandă","Programare CNC","Prelucrare","Control calitate","Livrare","Facturat"];
 const ETPA_CLR = { "Ofertă":"#f59e0b","Comandă":"#3b82f6","Programare CNC":"#8b5cf6","Prelucrare":"#06b6d4","Control calitate":"#f97316","Livrare":"#10b981","Facturat":"#6b7280" };
 const TARI     = { RO:"🇷🇴", DE:"🇩🇪", AT:"🇦🇹", NL:"🇳🇱", BE:"🇧🇪", DK:"🇩🇰" };
-const FIRMA    = { name:"BPT-Moulds Manufacturing SRL", adresa:"Str. Industriei 14, Piatra Neamț, România", cui:"RO12345678", reg:"J27/123/2018", iban:"RO49 AAAA 1B31 0075 9384 0000", banca:"Banca Transilvania", tel:"+40 232 XXX XXX", email:"office@bpt-manufacturing.ro", web:"www.bpt-manufacturing.ro" };
+const FIRMA    = { name:"BPT-Moulds Manufacturing SRL", sediu:"Dumbrava Roșie nr. 58, parter camera 2, Iași", lucru:"Calea Chișinăului nr. 132, Clădirea C10, Iași", cui:"RO41359487", reg:"J20/19002365226", iban:"RO29RZBR0000060028036557", banca:"Raiffeisen Bank", swift:"RZBRROBU", tel:"+40 755 925 964", email:"office@bpt-manufacturing.ro", web:"www.bpt-manufacturing.ro" };
+
+// ─── CONFIG OFERTARE BPT ──────────────────────────────────────────────────────
+const TARIFE_DEF = {
+  frezare3:     45,   // €/h frezare CNC 3-axe
+  strungCNC:    45,   // €/h strung CNC ax Y
+  strungConv:   30,   // €/h strung convențional
+  marja:        30,   // % marjă profit
+  setupFrezare: 25,   // € fix programare + prindere
+  setupStrung:  15,   // € fix prindere strung
+};
+
+const MATERIALE_DEF = [
+  { id: 1, name: "Aluminiu 6061",     pret: 6.5,  um: "€/kg", densitate: 2.70, mrr: 1.0 },
+  { id: 2, name: "Aluminiu 7075",     pret: 11.0, um: "€/kg", densitate: 2.81, mrr: 0.85 },
+  { id: 3, name: "Oțel S235 / OL37",  pret: 1.8,  um: "€/kg", densitate: 7.85, mrr: 0.45 },
+  { id: 4, name: "Oțel C45 / OLC45",  pret: 2.5,  um: "€/kg", densitate: 7.85, mrr: 0.40 },
+  { id: 5, name: "Oțel aliat 42CrMo4",pret: 3.8,  um: "€/kg", densitate: 7.85, mrr: 0.30 },
+  { id: 6, name: "Inox 304",          pret: 5.5,  um: "€/kg", densitate: 8.00, mrr: 0.25 },
+  { id: 7, name: "Inox 316L",         pret: 7.2,  um: "€/kg", densitate: 8.00, mrr: 0.22 },
+  { id: 8, name: "POM (Delrin)",      pret: 8.0,  um: "€/kg", densitate: 1.41, mrr: 1.4 },
+  { id: 9, name: "PA6 (Nylon)",       pret: 6.5,  um: "€/kg", densitate: 1.14, mrr: 1.5 },
+  { id:10, name: "PEEK",              pret: 95.0, um: "€/kg", densitate: 1.32, mrr: 1.2 },
+];
+
+// mrr = factor relativ rată îndepărtare material (1.0 = aluminiu de referință)
+
+// ─── CATEGORII PIESE BPT cu coeficienți de estimare ───────────────────────────
+// timpBaza = min/cm³ material îndepărtat | setup = min fix per piesă
+const CATEGORII_DEF = [
+  { id: 1, name: "Strunjit simplu (axe, bucșe, șuruburi)",     icon: "⟳",  tip: "strung",      timpBaza: 0.4, setup: 12, complexitate: 1.0, descriere: "Piese cilindrice simple cu operații de bază" },
+  { id: 2, name: "Strunjit complex (cu operații ax Y)",        icon: "⊚",  tip: "strungCNC",   timpBaza: 0.9, setup: 25, complexitate: 1.4, descriere: "Piese cu frezări laterale, găuriri pe ax Y" },
+  { id: 3, name: "Plăci frezate plane (găuriri/filetări)",     icon: "▭",  tip: "frezare",     timpBaza: 0.5, setup: 18, complexitate: 1.0, descriere: "Plăci cu operații pe o față, găuriri, filetări" },
+  { id: 4, name: "Carcase frezate 3D (buzunare, contururi)",   icon: "◧",  tip: "frezare",     timpBaza: 1.2, setup: 35, complexitate: 1.5, descriere: "Piese complexe cu buzunare, contururi, prelucrate pe mai multe fețe" },
+  { id: 5, name: "Dispozitive prindere / fixturi",             icon: "▤",  tip: "frezare",     timpBaza: 1.5, setup: 45, complexitate: 1.7, descriere: "Dispozitive personalizate cu tolerațe strânse" },
+  { id: 6, name: "Piese combinate (strung + frezare)",         icon: "⊞",  tip: "combo",       timpBaza: 1.4, setup: 50, complexitate: 1.6, descriere: "Piese ce necesită ambele operații" },
+];
+const COMPLEXITATI = [
+  { id: "simplu",  label: "Simplu",  mult: 0.85, color: "#10b981" },
+  { id: "mediu",   label: "Mediu",   mult: 1.00, color: "#3b82f6" },
+  { id: "complex", label: "Complex", mult: 1.40, color: "#f59e0b" },
+  { id: "expert",  label: "Expert",  mult: 1.85, color: "#ef4444" },
+];
 
 let _uid = 20;
 const uid   = () => ++_uid;
@@ -123,7 +165,8 @@ function generatePDF(type, doc, clienti, produse) {
       <div class="logo-block">
         <div class="company">BPT-MOULDS MANUFACTURING</div>
         <div class="sub">
-          ${FIRMA.adresa}<br>
+          Sediu: ${FIRMA.sediu}<br>
+          Punct de lucru: ${FIRMA.lucru}<br>
           CUI: ${FIRMA.cui} | Reg. Com.: ${FIRMA.reg}<br>
           Tel: ${FIRMA.tel} | ${FIRMA.email}
         </div>
@@ -140,7 +183,7 @@ function generatePDF(type, doc, clienti, produse) {
       <div class="party">
         <div class="label">FURNIZOR</div>
         <div class="name">${FIRMA.name}</div>
-        <div class="det">CUI: ${FIRMA.cui}<br>IBAN: ${FIRMA.iban}<br>Banca: ${FIRMA.banca}</div>
+        <div class="det">CUI: ${FIRMA.cui}<br>IBAN: ${FIRMA.iban}<br>Banca: ${FIRMA.banca} | SWIFT: ${FIRMA.swift}</div>
       </div>
       <div class="party">
         <div class="label">CLIENT</div>
@@ -177,7 +220,8 @@ function generatePDF(type, doc, clienti, produse) {
 
     ${isFactura ? `
     <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:12px 16px;font-size:12px;color:#1e40af;margin-bottom:20px">
-      💳 Plata se efectuează în contul: <strong>${FIRMA.iban}</strong> (${FIRMA.banca})<br>
+      💳 Plata se efectuează în contul: <strong>${FIRMA.iban}</strong><br>
+      Banca: ${FIRMA.banca} | SWIFT: ${FIRMA.swift}<br>
       Vă rugăm să menționați numărul facturii în descrierea transferului.
     </div>` : `
     <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:12px 16px;font-size:12px;color:#166534;margin-bottom:20px">
@@ -206,16 +250,20 @@ function generatePDF(type, doc, clienti, produse) {
 
 // ─── APP ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab,      setTab]      = useState("dashboard");
-  const [clienti,  setClienti]  = usePersist("bpt_clienti",  CLIENTI_DEF);
-  const [produse,  setProduse]  = usePersist("bpt_produse",  PRODUSE_DEF);
-  const [comenzi,  setComenzi]  = usePersist("bpt_comenzi",  COMENZI_DEF);
-  const [facturi,  setFacturi]  = usePersist("bpt_facturi",  FACTURI_DEF);
-  const [toast,    setToast]    = useState(null);
+  const [tab,        setTab]        = useState("dashboard");
+  const [clienti,    setClienti]    = usePersist("bpt_clienti",    CLIENTI_DEF);
+  const [produse,    setProduse]    = usePersist("bpt_produse",    PRODUSE_DEF);
+  const [comenzi,    setComenzi]    = usePersist("bpt_comenzi",    COMENZI_DEF);
+  const [facturi,    setFacturi]    = usePersist("bpt_facturi",    FACTURI_DEF);
+  const [oferte,     setOferte]     = usePersist("bpt_oferte",     []);
+  const [tarife,     setTarife]     = usePersist("bpt_tarife",     TARIFE_DEF);
+  const [materiale,  setMateriale]  = usePersist("bpt_materiale",  MATERIALE_DEF);
+  const [categorii,  setCategorii]  = usePersist("bpt_categorii",  CATEGORII_DEF);
+  const [toast,      setToast]      = useState(null);
 
   const showToast = (msg, type="ok") => { setToast({ msg, type }); setTimeout(() => setToast(null), 2800); };
 
-  const ctx = { clienti, setClienti, produse, setProduse, comenzi, setComenzi, facturi, setFacturi, showToast, generatePDF };
+  const ctx = { clienti, setClienti, produse, setProduse, comenzi, setComenzi, facturi, setFacturi, oferte, setOferte, tarife, setTarife, materiale, setMateriale, categorii, setCategorii, showToast, generatePDF };
   const urgent = comenzi.filter(c => c.prio==="urgent" && c.etapa!=="Facturat").length;
 
   const resetAll = () => {
@@ -247,6 +295,7 @@ export default function App() {
 
   const NAV = [
     { id:"dashboard", icon:"◈", label:"Dashboard"    },
+    { id:"ofertare",  icon:"€", label:"Ofertare"     },
     { id:"comenzi",   icon:"◻", label:"Comenzi"      },
     { id:"flux",      icon:"⟳", label:"Flux Lucru"   },
     { id:"clienti",   icon:"◎", label:"Clienți"      },
@@ -318,6 +367,7 @@ export default function App() {
         {/* CONTENT */}
         <div style={{ flex:1, overflow:"auto", padding:22 }} className="fi">
           {tab==="dashboard" && <TabDashboard {...ctx} setTab={setTab} />}
+          {tab==="ofertare"  && <TabOfertare  {...ctx} setTab={setTab} />}
           {tab==="comenzi"   && <TabComenzi   {...ctx} />}
           {tab==="flux"      && <TabFlux      {...ctx} />}
           {tab==="clienti"   && <TabClienti   {...ctx} />}
@@ -853,6 +903,354 @@ function ModalFact({ fact, clienti, comenzi, onSave, onClose }) {
         <div style={{ display:"flex", justifyContent:"flex-end", gap:10, marginTop:20 }}>
           <button className="btn" onClick={onClose} style={{ background:"#1a2035", color:"#64748b", padding:"9px 18px", borderRadius:6, fontSize:12 }}>Anulează</button>
           <button className="btn" onClick={()=>onSave(f)} style={{ background:"#2563eb", color:"#fff", padding:"9px 20px", borderRadius:6, fontSize:12, fontWeight:600 }}>Salvează</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── OFERTARE — calculator automat ────────────────────────────────────────────
+// Formula estimare timp:
+//   volum_mm³ = L × l × h
+//   masa_kg = volum_cm³ × densitate / 1000
+//   timp_min = (volum_cm³ × cat.timpBaza × cat.complexitate × complexitate.mult) / material.mrr + cat.setup
+//   cost_manopera = (timp_min/60) × tarif_orar(cat.tip)
+//   cost_material = masa × pret_material × 1.4 (factor risipă)
+//   pret_baza = cost_manopera + cost_material
+//   pret_final = pret_baza × (1 + marja/100)  → per buc
+function calcEstimare({ L, l, h, qty, catId, matId, complexId, categorii, materiale, tarife }) {
+  const cat = categorii.find(c => c.id === catId); if (!cat) return null;
+  const mat = materiale.find(m => m.id === matId); if (!mat) return null;
+  const cpl = COMPLEXITATI.find(c => c.id === complexId) || COMPLEXITATI[1];
+
+  const Ln = Number(L)||0, ln = Number(l)||0, hn = Number(h)||0, qtyn = Math.max(1, Number(qty)||1);
+  const volMM3 = Ln * ln * hn;
+  const volCM3 = volMM3 / 1000;
+  const masaKg = volCM3 * mat.densitate / 1000;
+
+  const timpMin    = volCM3 > 0 ? (volCM3 * cat.timpBaza * cat.complexitate * cpl.mult / mat.mrr) + cat.setup : cat.setup;
+  const tarif      = cat.tip === "strung" ? tarife.strungConv : cat.tip === "strungCNC" || cat.tip === "combo" ? tarife.strungCNC : tarife.frezare3;
+  const costMano   = (timpMin / 60) * tarif;
+  const costMat    = masaKg * mat.pret * 1.4; // 40% risipă material
+  const pretBaza   = costMano + costMat;
+  const pretBuc    = pretBaza * (1 + tarife.marja / 100);
+  const pretTotal  = pretBuc * qtyn;
+
+  return { volCM3, masaKg, timpMin, tarif, costMano, costMat, pretBaza, pretBuc, pretTotal, qtyn };
+}
+
+function TabOfertare({ oferte, setOferte, clienti, materiale, setMateriale, categorii, tarife, setTarife, setComenzi, comenzi, showToast, setTab }) {
+  const [view, setView] = useState("lista"); // lista | nou | tarife
+  const [editOferta, setEditOferta] = useState(null);
+
+  if (view === "tarife") return <SubTarife tarife={tarife} setTarife={setTarife} materiale={materiale} setMateriale={setMateriale} onBack={()=>setView("lista")} showToast={showToast} />;
+  if (view === "nou" || editOferta) return <SubOfertaNou oferta={editOferta} clienti={clienti} materiale={materiale} categorii={categorii} tarife={tarife}
+    onSave={(o) => {
+      if (o.id) { setOferte(p => p.map(x => x.id === o.id ? o : x)); showToast("Ofertă actualizată ✓"); }
+      else { setOferte(p => [...p, { ...o, id: uid(), nr: `OF-${new Date().getFullYear()}-${String(p.length+1).padStart(3,"0")}`, data: new Date().toISOString().slice(0,10), status: "draft" }]); showToast("Ofertă salvată ✓"); }
+      setView("lista"); setEditOferta(null);
+    }}
+    onClose={() => { setView("lista"); setEditOferta(null); }}
+  />;
+
+  // LISTA OFERTE
+  const stats = {
+    total: oferte.length,
+    draft: oferte.filter(o => o.status === "draft").length,
+    trimise: oferte.filter(o => o.status === "trimisa").length,
+    acceptate: oferte.filter(o => o.status === "acceptata").length,
+    valoare: oferte.reduce((s,o) => s + (o.pretTotal||0), 0),
+  };
+
+  const convertToComanda = (o) => {
+    if (!confirm(`Convertești oferta ${o.nr} în comandă fermă?`)) return;
+    const cl = clienti.find(c => c.id === o.clientId);
+    setComenzi(p => [...p, {
+      id: uid(),
+      nr: `CMD-${new Date().getFullYear()}-${String(p.length+1).padStart(3,"0")}`,
+      clientId: o.clientId,
+      data: new Date().toISOString().slice(0,10),
+      termen: "",
+      etapa: "Comandă",
+      prio: "normal",
+      linii: [{ prodId: 1, qty: o.qty, pret: o.pretBuc }],
+      obs: `Din oferta ${o.nr} · ${o.numePiesa || "piesă"} · ${o.material}`,
+    }]);
+    setOferte(p => p.map(x => x.id === o.id ? { ...x, status: "acceptata" } : x));
+    showToast(`Comandă creată din ${o.nr} ✓`);
+    setTab("comenzi");
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+      <PH title="Ofertare" sub="Calculator automat de preț pentru piese custom">
+        <div style={{ display:"flex", gap:8 }}>
+          <button className="btn" onClick={()=>setView("tarife")} style={{ background:"#1a2035", color:"#94a3b8", padding:"8px 14px", borderRadius:6, fontSize:12 }}>⚙ Tarife & Materiale</button>
+          <button className="btn" onClick={()=>setView("nou")} style={{ background:"#2563eb", color:"#fff", padding:"8px 16px", borderRadius:6, fontSize:12, fontWeight:600 }}>+ Ofertă nouă</button>
+        </div>
+      </PH>
+
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:12 }}>
+        {[
+          { l:"Total oferte",   v:stats.total,        c:"#3b82f6" },
+          { l:"Draft",          v:stats.draft,        c:"#64748b" },
+          { l:"Trimise",        v:stats.trimise,      c:"#f59e0b" },
+          { l:"Acceptate",      v:stats.acceptate,    c:"#10b981" },
+          { l:"Valoare totală", v:fmtE(stats.valoare),c:"#8b5cf6" },
+        ].map(k=>(
+          <div key={k.l} className="card" style={{ padding:"14px 16px" }}>
+            <div style={{ fontSize:10, color:"#475569", letterSpacing:".5px", marginBottom:6 }}>{k.l.toUpperCase()}</div>
+            <div style={{ fontSize:18, fontWeight:700, color:k.c, fontFamily:"'IBM Plex Sans',sans-serif" }}>{k.v}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="card" style={{ overflow:"hidden" }}>
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+          <thead><tr style={{ borderBottom:"1px solid #1a2035" }}>
+            {["Nr. Ofertă","Client","Piesă","Material","Buc.","Preț/buc","Total","Status",""].map(h=>
+              <th key={h} style={{ padding:"10px 14px", textAlign:"left", fontSize:10, color:"#475569", letterSpacing:".6px", fontWeight:600 }}>{h.toUpperCase()}</th>
+            )}
+          </tr></thead>
+          <tbody>
+            {oferte.length===0 && <tr><td colSpan={9} style={{ padding:40, textAlign:"center", color:"#334155", fontSize:12 }}>Nicio ofertă încă. Click <b style={{ color:"#60a5fa" }}>+ Ofertă nouă</b> ca să generezi prima estimare automată.</td></tr>}
+            {oferte.map(o => {
+              const cl = clienti.find(x=>x.id===o.clientId)||{};
+              const statusColor = { draft:"#64748b", trimisa:"#f59e0b", acceptata:"#10b981", refuzata:"#ef4444" }[o.status]||"#64748b";
+              return (
+                <tr key={o.id} className="tr" style={{ borderBottom:"1px solid #0f1117" }}>
+                  <td style={{ padding:"10px 14px", color:"#60a5fa", fontWeight:600 }}>{o.nr}</td>
+                  <td style={{ padding:"10px 14px", color:"#94a3b8" }}>{cl.name||"—"}</td>
+                  <td style={{ padding:"10px 14px", color:"#94a3b8" }}>{o.numePiesa||"piesă custom"}</td>
+                  <td style={{ padding:"10px 14px", color:"#64748b", fontSize:11 }}>{o.material||"—"}</td>
+                  <td style={{ padding:"10px 14px", color:"#94a3b8" }}>{o.qty}</td>
+                  <td style={{ padding:"10px 14px", color:"#94a3b8" }}>{fmtE(o.pretBuc||0)}</td>
+                  <td style={{ padding:"10px 14px", color:"#10b981", fontWeight:600 }}>{fmtE(o.pretTotal||0)}</td>
+                  <td style={{ padding:"10px 14px" }}>
+                    <span className="tag" style={{ background:statusColor+"18", color:statusColor, border:`1px solid ${statusColor}35` }}>{(o.status||"draft").toUpperCase()}</span>
+                  </td>
+                  <td style={{ padding:"10px 14px" }}>
+                    <div style={{ display:"flex", gap:5 }}>
+                      <button className="btn" onClick={()=>setEditOferta(o)} style={{ background:"#1a2035", color:"#94a3b8", padding:"5px 9px", borderRadius:5, fontSize:11 }}>✎</button>
+                      {o.status!=="acceptata" && <button className="btn" onClick={()=>convertToComanda(o)} title="Convertește în comandă" style={{ background:"rgba(16,185,129,.1)", color:"#34d399", padding:"5px 9px", borderRadius:5, fontSize:11, border:"1px solid rgba(16,185,129,.2)" }}>→ CMD</button>}
+                      <button className="btn" onClick={()=>{ if(confirm("Ștergi oferta?")){ setOferte(p=>p.filter(x=>x.id!==o.id)); showToast("Ofertă ștearsă"); }}} style={{ background:"rgba(239,68,68,.1)", color:"#f87171", padding:"5px 9px", borderRadius:5, fontSize:11 }}>✕</button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── SUB: Formular Ofertă Nouă cu calcul în timp real ────────────────────────
+function SubOfertaNou({ oferta, clienti, materiale, categorii, tarife, onSave, onClose }) {
+  const [f, setF] = useState(oferta || {
+    clientId: clienti[0]?.id || 1,
+    numePiesa: "",
+    catId: categorii[0]?.id || 1,
+    matId: materiale[0]?.id || 1,
+    complexId: "mediu",
+    L: 100, l: 50, h: 25,
+    qty: 1,
+    obs: "",
+    overridePret: null,
+  });
+  const s = (k,v) => setF(p => ({ ...p, [k]: v }));
+
+  const est = calcEstimare({ L:f.L, l:f.l, h:f.h, qty:f.qty, catId:f.catId, matId:f.matId, complexId:f.complexId, categorii, materiale, tarife });
+  const cat = categorii.find(c => c.id === f.catId);
+  const mat = materiale.find(m => m.id === f.matId);
+  const cpl = COMPLEXITATI.find(c => c.id === f.complexId);
+
+  const pretFinal = f.overridePret != null ? f.overridePret : (est?.pretBuc || 0);
+  const totalFinal = pretFinal * (f.qty || 1);
+
+  const save = () => {
+    const o = {
+      ...f,
+      pretBuc: pretFinal,
+      pretTotal: totalFinal,
+      material: mat?.name,
+      categorie: cat?.name,
+      timpMin: est?.timpMin,
+      masaKg: est?.masaKg,
+    };
+    onSave(o);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+      <PH title={oferta ? `Editare ${oferta.nr}` : "Ofertă nouă"} sub="Calculatorul estimează automat preț pe baza dimensiunilor și materialului">
+        <button className="btn" onClick={onClose} style={{ background:"#1a2035", color:"#94a3b8", padding:"8px 14px", borderRadius:6, fontSize:12 }}>← Înapoi</button>
+      </PH>
+
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 360px", gap:18 }}>
+        {/* STÂNGA — input */}
+        <div className="card" style={{ padding:20, display:"flex", flexDirection:"column", gap:16 }}>
+          <div style={{ fontSize:11, color:"#64748b", letterSpacing:".5px", fontWeight:600, marginBottom:-6 }}>1. INFORMAȚII GENERALE</div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            <div><Lbl>Client</Lbl><select className="inp" value={f.clientId} onChange={e=>s("clientId",Number(e.target.value))}>{clienti.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+            <div><Lbl>Cantitate (buc.)</Lbl><input className="inp" type="number" min={1} value={f.qty} onChange={e=>s("qty",Number(e.target.value)||1)} /></div>
+            <div style={{ gridColumn:"1 / -1" }}><Lbl>Denumire piesă</Lbl><input className="inp" value={f.numePiesa} onChange={e=>s("numePiesa",e.target.value)} placeholder="ex: Flanșă oțel Ø80×15" /></div>
+          </div>
+
+          <div style={{ fontSize:11, color:"#64748b", letterSpacing:".5px", fontWeight:600, marginTop:8, marginBottom:-6 }}>2. CATEGORIE PIESĂ</div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+            {categorii.map(c => (
+              <div key={c.id} onClick={()=>s("catId",c.id)} style={{ cursor:"pointer", padding:"10px 12px", background: f.catId===c.id ? "rgba(59,130,246,.12)" : "#0a0d13", border: `1px solid ${f.catId===c.id ? "#3b82f6" : "#1a2035"}`, borderRadius:6, transition:"all .15s" }}>
+                <div style={{ fontSize:13, fontWeight:600, color: f.catId===c.id ? "#60a5fa" : "#94a3b8", display:"flex", alignItems:"center", gap:6 }}><span style={{ fontSize:16 }}>{c.icon}</span>{c.name}</div>
+                <div style={{ fontSize:10, color:"#475569", marginTop:3 }}>{c.descriere}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ fontSize:11, color:"#64748b", letterSpacing:".5px", fontWeight:600, marginTop:8, marginBottom:-6 }}>3. DIMENSIUNI BRUT (mm)</div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+            <div><Lbl>Lungime (L)</Lbl><input className="inp" type="number" min={1} value={f.L} onChange={e=>s("L",Number(e.target.value)||0)} /></div>
+            <div><Lbl>Lățime / Ø</Lbl><input className="inp" type="number" min={1} value={f.l} onChange={e=>s("l",Number(e.target.value)||0)} /></div>
+            <div><Lbl>Înălțime / lungime ax</Lbl><input className="inp" type="number" min={1} value={f.h} onChange={e=>s("h",Number(e.target.value)||0)} /></div>
+          </div>
+
+          <div style={{ fontSize:11, color:"#64748b", letterSpacing:".5px", fontWeight:600, marginTop:8, marginBottom:-6 }}>4. MATERIAL & COMPLEXITATE</div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            <div><Lbl>Material</Lbl><select className="inp" value={f.matId} onChange={e=>s("matId",Number(e.target.value))}>{materiale.map(m=><option key={m.id} value={m.id}>{m.name} ({m.pret}€/kg)</option>)}</select></div>
+            <div><Lbl>Complexitate execuție</Lbl>
+              <div style={{ display:"flex", gap:5 }}>
+                {COMPLEXITATI.map(c=>(
+                  <button key={c.id} className="btn" onClick={()=>s("complexId",c.id)} style={{ flex:1, padding:"7px 0", borderRadius:5, fontSize:11, justifyContent:"center", background: f.complexId===c.id ? c.color+"22" : "#0a0d13", color: f.complexId===c.id ? c.color : "#475569", border:`1px solid ${f.complexId===c.id ? c.color+"66" : "#1a2035"}`, fontWeight:600 }}>{c.label}</button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div><Lbl>Observații / specificații (toleranțe, finisaj, etc.)</Lbl>
+            <textarea className="inp" rows={3} value={f.obs} onChange={e=>s("obs",e.target.value)} placeholder="ex: Toleranțe ISO h7, finisaj Ra 1.6, găuriri filetate M8..." style={{ resize:"vertical", fontFamily:"inherit" }} />
+          </div>
+        </div>
+
+        {/* DREAPTA — calcul în timp real */}
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          <div className="card" style={{ padding:18, background:"linear-gradient(180deg,#0f1117,#0c1622)", border:"1px solid #1d4ed8" }}>
+            <div style={{ fontSize:11, color:"#60a5fa", letterSpacing:".7px", fontWeight:700, marginBottom:14 }}>📊 ESTIMARE AUTOMATĂ</div>
+            {est && est.volCM3 > 0 ? <>
+              <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
+                <Row label="Volum piesă"     val={`${est.volCM3.toFixed(1)} cm³`} />
+                <Row label="Masă material"   val={`${est.masaKg.toFixed(3)} kg`} />
+                <Row label="Timp estimat"    val={`${Math.round(est.timpMin)} min · ${(est.timpMin/60).toFixed(2)} h`} highlight />
+                <Row label="Tarif aplicat"   val={`${est.tarif} €/h (${cat?.name.split(" ")[0]})`} />
+                <Row label="Complexitate"    val={`×${cpl?.mult.toFixed(2)} (${cpl?.label})`} />
+              </div>
+              <div style={{ height:1, background:"#1a2035", margin:"10px -18px 14px" }} />
+              <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+                <Row label="Cost manoperă"      val={fmtE(est.costMano)} />
+                <Row label="Cost material (+40% risipă)" val={fmtE(est.costMat)} />
+                <Row label={`Marjă profit ${tarife.marja}%`} val={fmtE(est.pretBaza * tarife.marja/100)} />
+              </div>
+              <div style={{ height:1, background:"#1a2035", margin:"12px -18px" }} />
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <span style={{ fontSize:12, color:"#94a3b8" }}>PREȚ ESTIMAT / BUC:</span>
+                <span style={{ fontSize:20, fontWeight:700, color:"#10b981", fontFamily:"'IBM Plex Sans',sans-serif" }}>{fmtE(est.pretBuc)}</span>
+              </div>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:6 }}>
+                <span style={{ fontSize:11, color:"#64748b" }}>Total {f.qty} buc:</span>
+                <span style={{ fontSize:13, fontWeight:600, color:"#3b82f6" }}>{fmtE(est.pretTotal)}</span>
+              </div>
+            </> : <div style={{ fontSize:12, color:"#64748b", textAlign:"center", padding:"20px 0" }}>Introduceți dimensiuni pentru estimare</div>}
+          </div>
+
+          {/* OVERRIDE PRET */}
+          <div className="card" style={{ padding:16 }}>
+            <Lbl>Ajustare manuală preț/buc (opțional)</Lbl>
+            <div style={{ display:"flex", gap:6 }}>
+              <input className="inp" type="number" min={0} value={f.overridePret ?? ""} onChange={e=>s("overridePret", e.target.value === "" ? null : Number(e.target.value))} placeholder={`Auto: ${(est?.pretBuc||0).toFixed(2)} €`} />
+              {f.overridePret != null && <button className="btn" onClick={()=>s("overridePret",null)} style={{ background:"#1a2035", color:"#94a3b8", padding:"0 10px", borderRadius:5, fontSize:11 }}>↻</button>}
+            </div>
+            {f.overridePret != null && est && (
+              <div style={{ fontSize:11, color: f.overridePret > est.pretBuc ? "#10b981" : "#f59e0b", marginTop:6 }}>
+                Diferență: {f.overridePret > est.pretBuc ? "+" : ""}{((f.overridePret/est.pretBuc-1)*100).toFixed(1)}% față de auto
+              </div>
+            )}
+          </div>
+
+          <div style={{ background:"#0f1117", border:"1px solid #1a2035", borderRadius:8, padding:14, fontSize:11, color:"#64748b", lineHeight:1.7 }}>
+            💡 <b style={{ color:"#94a3b8" }}>Cum funcționează:</b> Calculatorul folosește volumul piesei × coeficient categorie ÷ MRR material pentru a estima timpul, apoi aplică tariful tău, costul materialului și marja de profit.
+          </div>
+
+          <button className="btn" onClick={save} style={{ background:"#2563eb", color:"#fff", padding:"12px 18px", borderRadius:8, fontSize:13, fontWeight:600, justifyContent:"center" }}>
+            {oferta ? "💾 Salvează modificări" : "✓ Salvează oferta"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, val, highlight }) {
+  return (
+    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+      <span style={{ fontSize:11, color:"#64748b" }}>{label}:</span>
+      <span style={{ fontSize:12, color: highlight ? "#60a5fa" : "#94a3b8", fontWeight: highlight ? 700 : 500 }}>{val}</span>
+    </div>
+  );
+}
+
+// ─── SUB: Setări tarife și materiale ──────────────────────────────────────────
+function SubTarife({ tarife, setTarife, materiale, setMateriale, onBack, showToast }) {
+  const [t, setT] = useState(tarife);
+  const updMat = (id, k, v) => setMateriale(p => p.map(m => m.id === id ? { ...m, [k]: ["pret","densitate","mrr"].includes(k) ? Number(v) : v } : m));
+  const saveTarife = () => { setTarife(t); showToast("Tarife salvate ✓"); };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+      <PH title="Tarife & Materiale" sub="Configurează prețurile orare și costul materialelor">
+        <button className="btn" onClick={onBack} style={{ background:"#1a2035", color:"#94a3b8", padding:"8px 14px", borderRadius:6, fontSize:12 }}>← Înapoi</button>
+      </PH>
+
+      <div className="card" style={{ padding:20 }}>
+        <div style={{ fontSize:11, color:"#64748b", letterSpacing:".5px", fontWeight:600, marginBottom:14 }}>TARIFE ORARE & MARJĂ</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14 }}>
+          {[
+            { k:"frezare3",     l:"Frezare CNC 3-axe",    s:"€/h" },
+            { k:"strungCNC",    l:"Strung CNC ax Y",      s:"€/h" },
+            { k:"strungConv",   l:"Strung convențional",  s:"€/h" },
+            { k:"setupFrezare", l:"Setup frezare (fix)",  s:"€" },
+            { k:"setupStrung",  l:"Setup strung (fix)",   s:"€" },
+            { k:"marja",        l:"Marjă profit",         s:"%" },
+          ].map(({k,l,s})=>(
+            <div key={k}>
+              <Lbl>{l} <span style={{ color:"#475569" }}>({s})</span></Lbl>
+              <input className="inp" type="number" min={0} value={t[k]} onChange={e=>setT(p=>({...p,[k]:Number(e.target.value)||0}))} />
+            </div>
+          ))}
+        </div>
+        <div style={{ display:"flex", justifyContent:"flex-end", marginTop:16 }}>
+          <button className="btn" onClick={saveTarife} style={{ background:"#2563eb", color:"#fff", padding:"9px 20px", borderRadius:6, fontSize:12, fontWeight:600 }}>Salvează tarife</button>
+        </div>
+      </div>
+
+      <div className="card" style={{ padding:0, overflow:"hidden" }}>
+        <div style={{ padding:"14px 20px", borderBottom:"1px solid #1a2035", fontSize:11, color:"#64748b", letterSpacing:".5px", fontWeight:600 }}>BAZĂ MATERIALE (preț, densitate, factor MRR)</div>
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+          <thead><tr style={{ borderBottom:"1px solid #1a2035" }}>
+            {["Material","Preț (€/kg)","Densitate (g/cm³)","Factor MRR"].map(h=><th key={h} style={{ padding:"9px 14px", textAlign:"left", fontSize:10, color:"#475569", letterSpacing:".6px" }}>{h.toUpperCase()}</th>)}
+          </tr></thead>
+          <tbody>
+            {materiale.map(m=>(
+              <tr key={m.id} className="tr" style={{ borderBottom:"1px solid #0f1117" }}>
+                <td style={{ padding:"8px 14px", color:"#94a3b8" }}>{m.name}</td>
+                <td style={{ padding:"4px 14px" }}><input className="inp" type="number" step="0.1" min={0} value={m.pret} onChange={e=>updMat(m.id,"pret",e.target.value)} style={{ maxWidth:100, padding:"5px 8px", fontSize:12 }} /></td>
+                <td style={{ padding:"4px 14px" }}><input className="inp" type="number" step="0.01" min={0} value={m.densitate} onChange={e=>updMat(m.id,"densitate",e.target.value)} style={{ maxWidth:100, padding:"5px 8px", fontSize:12 }} /></td>
+                <td style={{ padding:"4px 14px" }}><input className="inp" type="number" step="0.05" min={0} value={m.mrr} onChange={e=>updMat(m.id,"mrr",e.target.value)} style={{ maxWidth:100, padding:"5px 8px", fontSize:12 }} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ padding:"10px 20px", borderTop:"1px solid #1a2035", fontSize:10, color:"#475569", lineHeight:1.6 }}>
+          💡 <b>Factor MRR</b> (Material Removal Rate): 1.0 = aluminiu referință. Materiale mai grele se prelucrează mai lent (MRR mai mic). Aluminiu = 1.0, Inox = 0.25 (de 4× mai lent).
         </div>
       </div>
     </div>
