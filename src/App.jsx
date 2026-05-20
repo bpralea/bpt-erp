@@ -995,18 +995,36 @@ function ModalFact({ fact, clienti, comenzi, onSave, onClose, T }) {
 }
 
 // ─── EXTRAGERE AUTOMATĂ DIN DESEN (PDF text + OCR fallback) ──────────────────
+// Încărcăm pdf.js și tesseract.js de pe CDN (esm.sh) ca să evităm probleme de build.
+// Se descarcă doar la prima utilizare, apoi rămân în cache.
+
+const CDN = {
+  pdfjs:        "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.min.mjs",
+  pdfjsWorker:  "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs",
+  tesseract:    "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.esm.min.js",
+};
+
+let _pdfjsCache = null;
+async function loadPdfJs() {
+  if (_pdfjsCache) return _pdfjsCache;
+  const lib = await import(/* @vite-ignore */ CDN.pdfjs);
+  lib.GlobalWorkerOptions.workerSrc = CDN.pdfjsWorker;
+  _pdfjsCache = lib;
+  return lib;
+}
+
+let _tesseractCache = null;
+async function loadTesseract() {
+  if (_tesseractCache) return _tesseractCache;
+  const mod = await import(/* @vite-ignore */ CDN.tesseract);
+  _tesseractCache = mod;
+  return mod;
+}
+
 async function extractFromPDF(file, onProgress) {
   onProgress?.({ stage: "loading", msg: "Se încarcă PDF.js…", pct: 5 });
 
-  // Import dinamic - se încarcă doar când e nevoie (~1MB)
-  const pdfjsLib = await import("pdfjs-dist/build/pdf.mjs");
-  // Set worker via blob URL for browser
-  if (typeof window !== "undefined" && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-      "pdfjs-dist/build/pdf.worker.min.mjs",
-      import.meta.url
-    ).toString();
-  }
+  const pdfjsLib = await loadPdfJs();
 
   const buffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
@@ -1042,7 +1060,7 @@ async function extractFromPDF(file, onProgress) {
 
   onProgress?.({ stage: "ocr-running", msg: "Recunoaștere text în desen…", pct: 50 });
 
-  const Tesseract = await import("tesseract.js");
+  const Tesseract = await loadTesseract();
   const result = await Tesseract.recognize(canvas, "eng", {
     logger: m => {
       if (m.status === "recognizing text") {
