@@ -1001,7 +1001,6 @@ function ModalFact({ fact, clienti, comenzi, onSave, onClose, T }) {
 const CDN = {
   pdfjs:        "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.min.mjs",
   pdfjsWorker:  "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs",
-  tesseract:    "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.esm.min.js",
 };
 
 let _pdfjsCache = null;
@@ -1016,9 +1015,18 @@ async function loadPdfJs() {
 let _tesseractCache = null;
 async function loadTesseract() {
   if (_tesseractCache) return _tesseractCache;
-  const mod = await import(/* @vite-ignore */ CDN.tesseract);
-  _tesseractCache = mod;
-  return mod;
+  // Încărcăm versiunea UMD prin script tag (expune window.Tesseract) - cel mai stabil
+  if (!window.Tesseract) {
+    await new Promise((resolve, reject) => {
+      const sc = document.createElement("script");
+      sc.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+      sc.onload = resolve;
+      sc.onerror = () => reject(new Error("Nu s-a putut încărca Tesseract de pe CDN"));
+      document.head.appendChild(sc);
+    });
+  }
+  _tesseractCache = window.Tesseract;
+  return _tesseractCache;
 }
 
 async function extractFromPDF(file, onProgress) {
@@ -1061,7 +1069,11 @@ async function extractFromPDF(file, onProgress) {
   onProgress?.({ stage: "ocr-running", msg: "Recunoaștere text în desen…", pct: 50 });
 
   const Tesseract = await loadTesseract();
-  const result = await Tesseract.recognize(canvas, "eng", {
+  const recognizeFn = Tesseract.recognize || (Tesseract.default && Tesseract.default.recognize);
+  if (typeof recognizeFn !== "function") {
+    throw new Error("Tesseract.recognize indisponibil");
+  }
+  const result = await recognizeFn(canvas, "eng", {
     logger: m => {
       if (m.status === "recognizing text") {
         onProgress?.({ stage: "ocr-running", msg: `OCR: ${Math.round(m.progress * 100)}%…`, pct: 50 + Math.round(m.progress * 45) });
