@@ -60,14 +60,16 @@ const MATERIALE_DEF = [
 // mrr = factor relativ rată îndepărtare material (1.0 = aluminiu de referință)
 
 // ─── CATEGORII PIESE BPT cu coeficienți de estimare ───────────────────────────
-// timpBaza = min/cm³ material îndepărtat | setup = min fix per piesă
+// timpBaza = min/cm³ material îndepărtat (referință Aluminiu MRR=1.0)
+// Pentru oțel (MRR=0.45) timpul real va fi ÷0.45 (deci ~2.2× mai lent)
+// setup = min fix per piesă (programare + prindere)
 const CATEGORII_DEF = [
-  { id: 1, name: "Strunjit simplu (axe, bucșe, șuruburi)",     icon: "⟳",  tip: "strung",      timpBaza: 0.4, setup: 12, complexitate: 1.0, descriere: "Piese cilindrice simple cu operații de bază" },
-  { id: 2, name: "Strunjit complex (cu operații ax Y)",        icon: "⊚",  tip: "strungCNC",   timpBaza: 0.9, setup: 25, complexitate: 1.4, descriere: "Piese cu frezări laterale, găuriri pe ax Y" },
-  { id: 3, name: "Plăci frezate plane (găuriri/filetări)",     icon: "▭",  tip: "frezare",     timpBaza: 0.5, setup: 18, complexitate: 1.0, descriere: "Plăci cu operații pe o față, găuriri, filetări" },
-  { id: 4, name: "Carcase frezate 3D (buzunare, contururi)",   icon: "◧",  tip: "frezare",     timpBaza: 1.2, setup: 35, complexitate: 1.5, descriere: "Piese complexe cu buzunare, contururi, prelucrate pe mai multe fețe" },
-  { id: 5, name: "Dispozitive prindere / fixturi",             icon: "▤",  tip: "frezare",     timpBaza: 1.5, setup: 45, complexitate: 1.7, descriere: "Dispozitive personalizate cu tolerațe strânse" },
-  { id: 6, name: "Piese combinate (strung + frezare)",         icon: "⊞",  tip: "combo",       timpBaza: 1.4, setup: 50, complexitate: 1.6, descriere: "Piese ce necesită ambele operații" },
+  { id: 1, name: "Strunjit simplu (axe, bucșe, șuruburi)",     icon: "⟳",  tip: "strung",      timpBaza: 0.035, setup: 8,  complexitate: 1.0, descriere: "Piese cilindrice simple cu operații de bază" },
+  { id: 2, name: "Strunjit complex (cu operații ax Y)",        icon: "⊚",  tip: "strungCNC",   timpBaza: 0.045, setup: 15, complexitate: 1.3, descriere: "Piese cu frezări laterale, găuriri pe ax Y" },
+  { id: 3, name: "Plăci frezate plane (găuriri/filetări)",     icon: "▭",  tip: "frezare",     timpBaza: 0.05,  setup: 12, complexitate: 1.0, descriere: "Plăci cu operații pe o față, găuriri, filetări" },
+  { id: 4, name: "Carcase frezate 3D (buzunare, contururi)",   icon: "◧",  tip: "frezare",     timpBaza: 0.08,  setup: 25, complexitate: 1.4, descriere: "Piese complexe cu buzunare, contururi, prelucrate pe mai multe fețe" },
+  { id: 5, name: "Dispozitive prindere / fixturi",             icon: "▤",  tip: "frezare",     timpBaza: 0.10,  setup: 30, complexitate: 1.5, descriere: "Dispozitive personalizate cu toleranțe strânse" },
+  { id: 6, name: "Piese combinate (strung + frezare)",         icon: "⊞",  tip: "combo",       timpBaza: 0.055, setup: 22, complexitate: 1.3, descriere: "Piese ce necesită ambele operații" },
 ];
 const COMPLEXITATI = [
   { id: "simplu",  label: "Simplu",  mult: 0.85, color: "#10b981" },
@@ -992,34 +994,324 @@ function ModalFact({ fact, clienti, comenzi, onSave, onClose, T }) {
   );
 }
 
-// ─── OFERTARE — calculator automat ────────────────────────────────────────────
-// Formula estimare timp:
-//   volum_mm³ = L × l × h
-//   masa_kg = volum_cm³ × densitate / 1000
-//   timp_min = (volum_cm³ × cat.timpBaza × cat.complexitate × complexitate.mult) / material.mrr + cat.setup
-//   cost_manopera = (timp_min/60) × tarif_orar(cat.tip)
-//   cost_material = masa × pret_material × 1.4 (factor risipă)
-//   pret_baza = cost_manopera + cost_material
-//   pret_final = pret_baza × (1 + marja/100)  → per buc
-function calcEstimare({ L, l, h, qty, catId, matId, complexId, categorii, materiale, tarife }) {
-  const cat = categorii.find(c => c.id === catId); if (!cat) return null;
-  const mat = materiale.find(m => m.id === matId); if (!mat) return null;
-  const cpl = COMPLEXITATI.find(c => c.id === complexId) || COMPLEXITATI[1];
+// ─── EXTRAGERE AUTOMATĂ DIN DESEN (PDF text + OCR fallback) ──────────────────
+async function extractFromPDF(file, onProgress) {
+  onProgress?.({ stage: "loading", msg: "Se încarcă PDF.js…", pct: 5 });
 
-  const Ln = Number(L)||0, ln = Number(l)||0, hn = Number(h)||0, qtyn = Math.max(1, Number(qty)||1);
-  const volMM3 = Ln * ln * hn;
-  const volCM3 = volMM3 / 1000;
-  const masaKg = volCM3 * mat.densitate / 1000;
+  // Import dinamic - se încarcă doar când e nevoie (~1MB)
+  const pdfjsLib = await import("pdfjs-dist/build/pdf.mjs");
+  // Set worker via blob URL for browser
+  if (typeof window !== "undefined" && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      "pdfjs-dist/build/pdf.worker.min.mjs",
+      import.meta.url
+    ).toString();
+  }
 
-  const timpMin    = volCM3 > 0 ? (volCM3 * cat.timpBaza * cat.complexitate * cpl.mult / mat.mrr) + cat.setup : cat.setup;
-  const tarif      = cat.tip === "strung" ? tarife.strungConv : cat.tip === "strungCNC" || cat.tip === "combo" ? tarife.strungCNC : tarife.frezare3;
-  const costMano   = (timpMin / 60) * tarif;
-  const costMat    = masaKg * mat.pret * 1.4; // 40% risipă material
-  const pretBaza   = costMano + costMat;
-  const pretBuc    = pretBaza * (1 + tarife.marja / 100);
-  const pretTotal  = pretBuc * qtyn;
+  const buffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  onProgress?.({ stage: "reading", msg: "Se citește textul…", pct: 25 });
 
-  return { volCM3, masaKg, timpMin, tarif, costMano, costMat, pretBaza, pretBuc, pretTotal, qtyn };
+  // PAS 1: Încearcă PDF.js (text vector)
+  let text = "";
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    text += content.items.map(i => i.str).join(" ") + " ";
+  }
+  text = text.trim();
+
+  // Dacă găsim text suficient, folosim
+  const wordCount = text.split(/\s+/).filter(w => w.length > 1).length;
+  if (wordCount >= 5) {
+    onProgress?.({ stage: "done", msg: "Text extras din PDF", pct: 100 });
+    return { text, method: "pdfjs" };
+  }
+
+  // PAS 2: PDF fără text - folosește OCR
+  onProgress?.({ stage: "ocr-init", msg: "PDF fără text - inițiez OCR…", pct: 35 });
+
+  // Randează prima pagină la rezoluție mare
+  const page = await pdf.getPage(1);
+  const viewport = page.getViewport({ scale: 2.5 });
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  onProgress?.({ stage: "ocr-running", msg: "Recunoaștere text în desen…", pct: 50 });
+
+  const Tesseract = await import("tesseract.js");
+  const result = await Tesseract.recognize(canvas, "eng", {
+    logger: m => {
+      if (m.status === "recognizing text") {
+        onProgress?.({ stage: "ocr-running", msg: `OCR: ${Math.round(m.progress * 100)}%…`, pct: 50 + Math.round(m.progress * 45) });
+      }
+    },
+  });
+
+  onProgress?.({ stage: "done", msg: "OCR finalizat", pct: 100 });
+  return { text: result.data.text, method: "ocr" };
+}
+
+// Parse text extras → date structurate
+function parseDrawingText(text) {
+  const result = {
+    dimensiuni: [],           // {valoare, toleranta, tip: "diam"|"linear"}
+    filete: [],               // {tip:"M10", nr:4}
+    material: null,
+    cantitate: null,
+    scara: null,
+    denumire: null,
+    nrDesen: null,
+    toleranteStranse: false,
+    raw: text,
+  };
+
+  // Curăță textul
+  const clean = text.replace(/\s+/g, " ").trim();
+  const upper = clean.toUpperCase();
+
+  // 1. DIAMETRE (Ø80, ø40, $40, diam40 etc)
+  const diamPattern = /(?:Ø|⌀|\$|D|DIA|DIAM)\s*(\d{1,3}(?:[.,]\d{1,3})?)\s*(?:([+-]?\d+\.?\d*)\s*\/?\s*([+-]?\d+\.?\d*)?)?\s*(H[0-9]+|h[0-9]+|F[0-9]+|f[0-9]+)?/gi;
+  let m;
+  while ((m = diamPattern.exec(clean)) !== null) {
+    const val = parseFloat(m[1].replace(",", "."));
+    if (val > 1 && val < 1000) {
+      result.dimensiuni.push({
+        valoare: val,
+        tip: "diam",
+        toleranta: m[4] || (m[2] ? `${m[2]}/${m[3]||0}` : null),
+      });
+    }
+  }
+
+  // Caut și pattern alternativ: "$40 +0.025 H7"
+  const altDiam = /\$?(\d{2,3})\s*\+\s*([\d.]+)\s*\/\s*([\d.]+)?\s*(H\d+|h\d+)/gi;
+  while ((m = altDiam.exec(clean)) !== null) {
+    const val = parseFloat(m[1]);
+    if (val > 1 && val < 1000 && !result.dimensiuni.some(d => d.valoare === val)) {
+      result.dimensiuni.push({ valoare: val, tip: "diam", toleranta: m[4] });
+    }
+  }
+
+  // 2. FILETE (M5, M6, M8, M10, M12 cu opțional număr "4x" sau "(4x)" sau "M10 4x")
+  const filetPattern = /(?:(\d+)\s*[xX×]\s*)?M\s*(5|6|8|10|12|14|16|18|20)(?:\s*[xX×]\s*(\d+))?\s*(?:\(?\s*(\d+)\s*[xX×]\s*\)?)?/gi;
+  while ((m = filetPattern.exec(clean)) !== null) {
+    const tip = `M${m[2]}`;
+    const nr = parseInt(m[1] || m[4] || "1");
+    // Combină dacă deja există
+    const existing = result.filete.find(f => f.tip === tip);
+    if (existing) {
+      existing.nr = Math.max(existing.nr, nr);
+    } else {
+      result.filete.push({ tip, nr });
+    }
+  }
+
+  // 3. MATERIAL - căutăm pattern-uri comune
+  const materialPatterns = [
+    { regex: /\bSt\s*37\b|\bS235\b|\bOL\s*37\b/i,         match: "Oțel S235 / OL37" },
+    { regex: /\bC45\b|\bOLC\s*45\b/i,                       match: "Oțel C45 / OLC45" },
+    { regex: /\b42CrMo4?\b|\b42\s*CR\s*MO\b/i,             match: "Oțel aliat 42CrMo4" },
+    { regex: /\bAl\s*6061\b|\b6061\b|\bAlMg\b/i,           match: "Aluminiu 6061" },
+    { regex: /\bAl\s*7075\b|\b7075\b/i,                     match: "Aluminiu 7075" },
+    { regex: /\binox\s*304\b|\b1\.4301\b|\bAISI\s*304\b/i,  match: "Inox 304" },
+    { regex: /\binox\s*316\b|\b1\.4404\b|\bAISI\s*316\b/i,  match: "Inox 316L" },
+    { regex: /\bPOM\b|\bDelrin\b/i,                          match: "POM (Delrin)" },
+    { regex: /\bPA6\b|\bNylon\b/i,                           match: "PA6 (Nylon)" },
+    { regex: /\bPEEK\b/i,                                    match: "PEEK" },
+  ];
+  for (const mp of materialPatterns) {
+    if (mp.regex.test(clean)) { result.material = mp.match; break; }
+  }
+
+  // 4. TOLERANȚE STRÂNSE (H7, h6, H6, h5)
+  if (/\b[Hh][567]\b/.test(clean) || /\b±\s*0\.0[0-3]/.test(clean) || /\+0\.0[0-3]/.test(clean)) {
+    result.toleranteStranse = true;
+  }
+
+  // 5. CANTITATE
+  // RO/EN: "Buc 2", "Cant 2", "Qty 2", "Pieces 2"
+  // NL/DE: "Aantal 2", "Stück 2", "Anzahl 2"
+  const cantPatterns = [
+    /(?:aantal|stück|anzahl|cantitate|qty|quantity|pieces|buc)[:\s]+(\d{1,4})/i,
+  ];
+  for (const cp of cantPatterns) {
+    const cm = clean.match(cp);
+    if (cm) { result.cantitate = parseInt(cm[1]); break; }
+  }
+
+  // 6. SCARĂ (1:1, 1:2, 2:1)
+  const scaraMatch = clean.match(/(?:scale|scara|schaal|massstab)[:\s]*(\d+\s*:\s*\d+)/i);
+  if (scaraMatch) result.scara = scaraMatch[1].replace(/\s/g, "");
+
+  // 7. DENUMIRE PIESĂ (după "Benaming", "Denumire", "Name", "Bezeichnung")
+  const denumireMatch = clean.match(/(?:benaming|denumire|name|bezeichnung)[:\s]*([A-ZĂÎÂȘȚ][A-Za-zĂÎÂȘȚăîâșț0-9\s\-]{2,30})/i);
+  if (denumireMatch) result.denumire = denumireMatch[1].trim();
+
+  // 8. NR DESEN (RA-001-02, etc)
+  const nrDesMatch = clean.match(/([A-Z]{1,3}[-_]\d{3,5}[-_]?\d*)/);
+  if (nrDesMatch) result.nrDesen = nrDesMatch[1];
+
+  // Sortează dimensiunile descrescător
+  result.dimensiuni.sort((a, b) => b.valoare - a.valoare);
+
+  return result;
+}
+
+// Helper: aplică datele extrase peste form
+function applyExtractedData(extracted, currentForm, materiale) {
+  const f = { ...currentForm };
+
+  // Dimensiunea cea mai mare este probabil bară brută (pentru piese cilindrice)
+  // sau lungimea (pentru frezat)
+  const diametre = extracted.dimensiuni.filter(d => d.tip === "diam").map(d => d.valoare);
+  if (diametre.length > 0) {
+    const maxDiam = Math.max(...diametre);
+    // Adaugă +10mm la diametru pentru bară brută (Ø80 → bară Ø90)
+    f.dBrut = Math.ceil((maxDiam + 10) / 5) * 5;
+  }
+
+  // Material
+  if (extracted.material) {
+    const mat = materiale.find(m => m.name === extracted.material);
+    if (mat) f.matId = mat.id;
+  }
+
+  // Cantitate
+  if (extracted.cantitate && extracted.cantitate > 0 && extracted.cantitate < 10000) {
+    f.qty = extracted.cantitate;
+  }
+
+  // Filete - ia ce e mai frecvent
+  if (extracted.filete.length > 0) {
+    const totalFilete = extracted.filete.reduce((s, fil) => s + fil.nr, 0);
+    f.nrGauri = totalFilete;
+    // Filetul dominant
+    const sorted = [...extracted.filete].sort((a, b) => b.nr - a.nr);
+    if (sorted[0]) f.filetGauri = sorted[0].tip;
+  }
+
+  // Toleranțe strânse / alezaj precis
+  if (extracted.toleranteStranse) {
+    // Verifică dacă există un diametru cu H7/h7
+    const hasPrec = extracted.dimensiuni.some(d => d.toleranta && /[Hh][67]/.test(d.toleranta));
+    if (hasPrec) f.aleazjPrecis = true;
+    else f.tolerantaStr = true;
+  }
+
+  // Denumire
+  if (extracted.denumire && !f.numePiesa) {
+    f.numePiesa = extracted.denumire + (extracted.nrDesen ? ` (${extracted.nrDesen})` : "");
+  } else if (extracted.nrDesen && !f.numePiesa) {
+    f.numePiesa = extracted.nrDesen;
+  }
+
+  return f;
+}
+
+// ─── OFERTARE — calculator automat v2 ────────────────────────────────────────
+// LOGICĂ CORECTĂ:
+//   - Material BRUT (bară Ø×L pentru strunjit, bloc L×l×h pentru frezat)
+//   - Piesă FINALĂ (volum estimat din % material rămas)
+//   - Volum ÎNDEPĂRTAT = brut - final (= ceea ce determină timpul)
+//   - Timp prelucrare = vol_îndepărtat × timp/cm³ × MRR × complexitate + operații extra + setup
+//   - Cost manoperă = timp × tarif
+//   - Cost material = volum BRUT × densitate × preț (clientul plătește tot ce-ai cumpărat)
+//   - Operații extra: găuri filetate (M6 = 2min, M8 = 2.5min, M10 = 3min, etc.)
+//   - Toleranțe strânse (H7, h6) → ×1.3 timp prelucrare
+//
+// Pentru strunjire: viteza efectivă (cm³/min ÎNDEPĂRTAT):
+//   Aluminiu: ~12 cm³/min | Oțel: ~5 cm³/min | Inox: ~3 cm³/min
+// Pentru frezare:
+//   Aluminiu: ~10 cm³/min | Oțel: ~3 cm³/min | Inox: ~2 cm³/min
+// Aceste valori sunt aplicate prin MRR material (1.0=Al ref) și timpBaza categorie
+
+function calcEstimare(f, categorii, materiale, tarife) {
+  const cat = categorii.find(c => c.id === f.catId); if (!cat) return null;
+  const mat = materiale.find(m => m.id === f.matId); if (!mat) return null;
+  const cpl = COMPLEXITATI.find(c => c.id === f.complexId) || COMPLEXITATI[1];
+
+  const qtyn = Math.max(1, Number(f.qty)||1);
+  const procIndep = Math.max(0, Math.min(95, Number(f.procIndep)||30)) / 100; // % material îndepărtat
+
+  // ─── VOLUME ──────────────────────────────────────────────────────────────
+  let volBrutCM3 = 0;  // volum bară/bloc pornire
+  let volFinCM3  = 0;  // volum piesă finită
+  let volIndepCM3 = 0; // volum efectiv îndepărtat
+
+  const isCilindric = ["strung","strungCNC","combo"].includes(cat.tip);
+
+  if (isCilindric) {
+    // Bară cilindrică: Ø_brut × L_brut
+    const dBrut = Number(f.dBrut)||0;
+    const lBrut = Number(f.lBrut)||0;
+    volBrutCM3 = (Math.PI * (dBrut/2)**2 * lBrut) / 1000;
+    volIndepCM3 = volBrutCM3 * procIndep;
+    volFinCM3 = volBrutCM3 - volIndepCM3;
+  } else {
+    // Bloc paralelipipedic: L × l × h
+    const Ln = Number(f.L)||0, ln = Number(f.l)||0, hn = Number(f.h)||0;
+    volBrutCM3 = (Ln * ln * hn) / 1000;
+    volIndepCM3 = volBrutCM3 * procIndep;
+    volFinCM3 = volBrutCM3 - volIndepCM3;
+  }
+
+  // ─── MASA BRUTĂ (clientul plătește materialul brut, nu finalul) ──────────
+  const masaBrutKg = volBrutCM3 * mat.densitate / 1000;
+  const masaFinKg  = volFinCM3 * mat.densitate / 1000;
+
+  // ─── TIMP DE PRELUCRARE ──────────────────────────────────────────────────
+  // timp = vol_îndepărtat × timp_baza_cat / MRR × complexitate
+  // timpBaza este în min/cm³ pentru material referință Al (MRR=1.0)
+  let timpPrelucrareMin = volIndepCM3 * cat.timpBaza * cat.complexitate * cpl.mult / mat.mrr;
+
+  // ─── OPERAȚII EXTRA (găuri filetate, alezaje, teșituri) ──────────────────
+  // Fiecare gaură filetată: găurit + filetat
+  const nrGauri    = Math.max(0, Number(f.nrGauri)||0);
+  const filetGauri = f.filetGauri || "M8"; // M6, M8, M10, M12
+  const timpPerGaura = { M5: 1.5, M6: 2.0, M8: 2.5, M10: 3.0, M12: 3.5, M14: 4.0, M16: 4.5 }[filetGauri] || 2.5;
+  const timpGauri = nrGauri * timpPerGaura;
+
+  // Alezaje precise (H7, h6, h7)
+  const timpAlezaj = f.aleazjPrecis ? 8 : 0;
+
+  // Toleranțe strânse - factor pe TIMP prelucrare
+  const factorToleranta = f.tolerantaStr ? 1.30 : 1.0;
+  timpPrelucrareMin *= factorToleranta;
+
+  // Setup categorie
+  const setupMin = cat.setup;
+
+  // TIMP TOTAL = setup + prelucrare + găuri + alezaj
+  const timpMin = setupMin + timpPrelucrareMin + timpGauri + timpAlezaj;
+
+  // ─── COSTURI ─────────────────────────────────────────────────────────────
+  const tarif = cat.tip === "strung" ? tarife.strungConv
+              : cat.tip === "strungCNC" || cat.tip === "combo" ? tarife.strungCNC
+              : tarife.frezare3;
+  const costMano = (timpMin / 60) * tarif;
+
+  // Material: client plătește bară brută × factor risipă mic (5-10% pentru pierderi reale)
+  const factorRisipa = isCilindric ? 1.10 : 1.15;
+  const costMat = masaBrutKg * mat.pret * factorRisipa;
+
+  const pretBaza  = costMano + costMat;
+  const pretBuc   = pretBaza * (1 + tarife.marja / 100);
+  const pretTotal = pretBuc * qtyn;
+
+  return {
+    volBrutCM3, volFinCM3, volIndepCM3,
+    masaBrutKg, masaFinKg,
+    timpPrelucrareMin, timpGauri, timpAlezaj, setupMin, timpMin,
+    procIndep: procIndep * 100,
+    tarif, costMano, costMat, factorRisipa,
+    pretBaza, pretBuc, pretTotal, qtyn,
+    isCilindric,
+    cat, mat, cpl,
+  };
 }
 
 function TabOfertare({ oferte, setOferte, clienti, materiale, setMateriale, categorii, tarife, setTarife, setComenzi, comenzi, showToast, setTab, T }) {
@@ -1144,7 +1436,18 @@ function SubOfertaNou({ oferta, clienti, materiale, categorii, tarife, onSave, o
     catId: categorii[0]?.id || 1,
     matId: materiale[0]?.id || 1,
     complexId: "mediu",
-    L: 100, l: 50, h: 25,
+    // Strunjit (cilindric)
+    dBrut: 90, lBrut: 65,
+    // Frezat (paralelipiped)
+    L: 100, l: 80, h: 30,
+    // Procent material îndepărtat
+    procIndep: 35,
+    // Operații suplimentare
+    nrGauri: 0,
+    filetGauri: "M8",
+    aleazjPrecis: false,
+    tolerantaStr: false,
+    // General
     qty: 1,
     obs: "",
     overridePret: null,
@@ -1152,10 +1455,37 @@ function SubOfertaNou({ oferta, clienti, materiale, categorii, tarife, onSave, o
   });
   const s = (k,v) => setF(p => ({ ...p, [k]: v }));
 
-  const est = calcEstimare({ L:f.L, l:f.l, h:f.h, qty:f.qty, catId:f.catId, matId:f.matId, complexId:f.complexId, categorii, materiale, tarife });
+  // Extragere automată din desen PDF
+  const [extracting, setExtracting] = useState(null); // null | {msg, pct}
+  const [extracted, setExtracted] = useState(null);   // rezultatul parsat
+
+  const handleExtract = async (file) => {
+    if (!file) return;
+    setExtracted(null);
+    setExtracting({ msg: "Se inițializează…", pct: 0 });
+    try {
+      const { text, method } = await extractFromPDF(file, (p) => setExtracting({ msg: p.msg, pct: p.pct }));
+      const parsed = parseDrawingText(text);
+      parsed.method = method;
+      setExtracted(parsed);
+      setExtracting(null);
+    } catch (err) {
+      setExtracting(null);
+      alert("Eroare la extragere: " + (err?.message || err));
+    }
+  };
+
+  const applyExtracted = () => {
+    if (!extracted) return;
+    setF(prev => applyExtractedData(extracted, prev, materiale));
+    setExtracted(null);
+  };
+
+  const est = calcEstimare(f, categorii, materiale, tarife);
   const cat = categorii.find(c => c.id === f.catId);
   const mat = materiale.find(m => m.id === f.matId);
   const cpl = COMPLEXITATI.find(c => c.id === f.complexId);
+  const isCilindric = est?.isCilindric;
 
   const pretFinal = f.overridePret != null ? f.overridePret : (est?.pretBuc || 0);
   const totalFinal = pretFinal * (f.qty || 1);
@@ -1168,42 +1498,64 @@ function SubOfertaNou({ oferta, clienti, materiale, categorii, tarife, onSave, o
       material: mat?.name,
       categorie: cat?.name,
       timpMin: est?.timpMin,
-      masaKg: est?.masaKg,
+      masaKg: est?.masaBrutKg,
     };
     onSave(o);
   };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
-      <PH title={oferta ? `Editare ${oferta.nr}` : "Ofertă nouă"} sub="Calculatorul estimează automat preț pe baza dimensiunilor și materialului" T={T}>
+      <PH title={oferta ? `Editare ${oferta.nr}` : "Ofertă nouă"} sub="Calculator cu material brut, piesă finită și operații extra" T={T}>
         <button className="btn" onClick={onClose} style={{ background:T.border, color:T.textMuted, padding:"8px 14px", borderRadius:6, fontSize:12 }}>← Înapoi</button>
       </PH>
 
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 360px", gap:18 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 380px", gap:18 }}>
         {/* STÂNGA — input */}
         <div className="card" style={{ padding:20, display:"flex", flexDirection:"column", gap:16 }}>
           <div style={{ fontSize:11, color:T.textDim, letterSpacing:".5px", fontWeight:600, marginBottom:-6 }}>1. INFORMAȚII GENERALE</div>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
             <div><Lbl T={T}>Client</Lbl><select className="inp" value={f.clientId} onChange={e=>s("clientId",Number(e.target.value))}>{clienti.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
             <div><Lbl T={T}>Cantitate (buc.)</Lbl><input className="inp" type="number" min={1} value={f.qty} onChange={e=>s("qty",Number(e.target.value)||1)} /></div>
-            <div style={{ gridColumn:"1 / -1" }}><Lbl T={T}>Denumire piesă</Lbl><input className="inp" value={f.numePiesa} onChange={e=>s("numePiesa",e.target.value)} placeholder="ex: Flanșă oțel Ø80×15" /></div>
+            <div style={{ gridColumn:"1 / -1" }}><Lbl T={T}>Denumire piesă</Lbl><input className="inp" value={f.numePiesa} onChange={e=>s("numePiesa",e.target.value)} placeholder="ex: STEUN Ø80×60 (RA-001-02)" /></div>
           </div>
 
           <div style={{ fontSize:11, color:T.textDim, letterSpacing:".5px", fontWeight:600, marginTop:8, marginBottom:-6 }}>2. CATEGORIE PIESĂ</div>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
             {categorii.map(c => (
-              <div key={c.id} onClick={()=>s("catId",c.id)} style={{ cursor:"pointer", padding:"10px 12px", background: f.catId===c.id ? "rgba(59,130,246,.12)" : T.bgInput, border: `1px solid ${f.catId===c.id ? T.accent : T.border}`, borderRadius:6, transition:"all .15s" }}>
+              <div key={c.id} onClick={()=>s("catId",c.id)} style={{ cursor:"pointer", padding:"10px 12px", background: f.catId===c.id ? T.accent+"15" : T.bgInput, border: `1px solid ${f.catId===c.id ? T.accent : T.border}`, borderRadius:6, transition:"all .15s" }}>
                 <div style={{ fontSize:13, fontWeight:600, color: f.catId===c.id ? T.accent : T.textMuted, display:"flex", alignItems:"center", gap:6 }}><span style={{ fontSize:16 }}>{c.icon}</span>{c.name}</div>
                 <div style={{ fontSize:10, color:T.textFaint, marginTop:3 }}>{c.descriere}</div>
               </div>
             ))}
           </div>
 
-          <div style={{ fontSize:11, color:T.textDim, letterSpacing:".5px", fontWeight:600, marginTop:8, marginBottom:-6 }}>3. DIMENSIUNI BRUT (mm)</div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
-            <div><Lbl T={T}>Lungime (L)</Lbl><input className="inp" type="number" min={1} value={f.L} onChange={e=>s("L",Number(e.target.value)||0)} /></div>
-            <div><Lbl T={T}>Lățime / Ø</Lbl><input className="inp" type="number" min={1} value={f.l} onChange={e=>s("l",Number(e.target.value)||0)} /></div>
-            <div><Lbl T={T}>Înălțime / lungime ax</Lbl><input className="inp" type="number" min={1} value={f.h} onChange={e=>s("h",Number(e.target.value)||0)} /></div>
+          {/* DIMENSIUNI - se schimbă în funcție de tipul piesei */}
+          <div style={{ fontSize:11, color:T.textDim, letterSpacing:".5px", fontWeight:600, marginTop:8, marginBottom:-6 }}>
+            3. {isCilindric ? "BARĂ DE PORNIRE (cilindrică)" : "BLOC MATERIAL BRUT"} (mm)
+          </div>
+          {isCilindric ? (
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+              <div><Lbl T={T}>Diametru bară (Ø)</Lbl><input className="inp" type="number" min={1} value={f.dBrut} onChange={e=>s("dBrut",Number(e.target.value)||0)} placeholder="ex: 90" /></div>
+              <div><Lbl T={T}>Lungime bară</Lbl><input className="inp" type="number" min={1} value={f.lBrut} onChange={e=>s("lBrut",Number(e.target.value)||0)} placeholder="ex: 65" /></div>
+            </div>
+          ) : (
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+              <div><Lbl T={T}>Lungime (L)</Lbl><input className="inp" type="number" min={1} value={f.L} onChange={e=>s("L",Number(e.target.value)||0)} /></div>
+              <div><Lbl T={T}>Lățime (l)</Lbl><input className="inp" type="number" min={1} value={f.l} onChange={e=>s("l",Number(e.target.value)||0)} /></div>
+              <div><Lbl T={T}>Înălțime (h)</Lbl><input className="inp" type="number" min={1} value={f.h} onChange={e=>s("h",Number(e.target.value)||0)} /></div>
+            </div>
+          )}
+
+          {/* PROCENT MATERIAL ÎNDEPĂRTAT */}
+          <div>
+            <Lbl T={T}>Procent material îndepărtat (estimare): <b style={{ color: T.accent }}>{f.procIndep}%</b></Lbl>
+            <input type="range" min={5} max={90} step={5} value={f.procIndep} onChange={e=>s("procIndep",Number(e.target.value))} style={{ width:"100%", accentColor: T.accent }} />
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:T.textFaint, marginTop:4 }}>
+              <span>5% (doar finisare)</span>
+              <span>30% (uzual)</span>
+              <span>70% (carcasă goală)</span>
+              <span>90% (foarte gol)</span>
+            </div>
           </div>
 
           <div style={{ fontSize:11, color:T.textDim, letterSpacing:".5px", fontWeight:600, marginTop:8, marginBottom:-6 }}>4. MATERIAL & COMPLEXITATE</div>
@@ -1218,40 +1570,132 @@ function SubOfertaNou({ oferta, clienti, materiale, categorii, tarife, onSave, o
             </div>
           </div>
 
-          <div><Lbl T={T}>Observații / specificații (toleranțe, finisaj, etc.)</Lbl>
-            <textarea className="inp" rows={3} value={f.obs} onChange={e=>s("obs",e.target.value)} placeholder="ex: Toleranțe ISO h7, finisaj Ra 1.6, găuriri filetate M8..." style={{ resize:"vertical", fontFamily:"inherit" }} />
+          {/* OPERAȚII SUPLIMENTARE */}
+          <div style={{ fontSize:11, color:T.textDim, letterSpacing:".5px", fontWeight:600, marginTop:8, marginBottom:-6 }}>5. OPERAȚII SUPLIMENTARE</div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            <div><Lbl T={T}>Nr. găuri filetate</Lbl><input className="inp" type="number" min={0} value={f.nrGauri} onChange={e=>s("nrGauri",Number(e.target.value)||0)} /></div>
+            <div><Lbl T={T}>Filet</Lbl>
+              <select className="inp" value={f.filetGauri} onChange={e=>s("filetGauri",e.target.value)}>
+                {["M5","M6","M8","M10","M12","M14","M16"].map(t=><option key={t}>{t}</option>)}
+              </select>
+            </div>
+            <label style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 12px", background:T.bgInput, border:`1px solid ${T.border}`, borderRadius:6, cursor:"pointer", fontSize:12, color:T.textMuted }}>
+              <input type="checkbox" checked={f.aleazjPrecis} onChange={e=>s("aleazjPrecis",e.target.checked)} style={{ accentColor: T.accent }} />
+              Alezaj precis (H7/h7) <span style={{ fontSize:10, color:T.textFaint }}>+8 min</span>
+            </label>
+            <label style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 12px", background:T.bgInput, border:`1px solid ${T.border}`, borderRadius:6, cursor:"pointer", fontSize:12, color:T.textMuted }}>
+              <input type="checkbox" checked={f.tolerantaStr} onChange={e=>s("tolerantaStr",e.target.checked)} style={{ accentColor: T.accent }} />
+              Toleranțe strânse <span style={{ fontSize:10, color:T.textFaint }}>×1.3 timp</span>
+            </label>
           </div>
 
-          <div style={{ fontSize:11, color:T.textDim, letterSpacing:".5px", fontWeight:600, marginTop:4, marginBottom:-6 }}>5. ATAȘAMENTE (desene 2D/3D, imagini)</div>
+          <div><Lbl T={T}>Observații / specificații (toleranțe, finisaj, etc.)</Lbl>
+            <textarea className="inp" rows={3} value={f.obs} onChange={e=>s("obs",e.target.value)} placeholder="ex: Toleranțe ISO h7, finisaj Ra 1.6, oxidare neagră ZWARTEN..." style={{ resize:"vertical", fontFamily:"inherit" }} />
+          </div>
+
+          <div style={{ fontSize:11, color:T.textDim, letterSpacing:".5px", fontWeight:600, marginTop:4, marginBottom:-6 }}>6. ATAȘAMENTE & EXTRAGERE AUTOMATĂ</div>
+
+          {/* BUTON EXTRAGERE DIN DESEN */}
+          <div style={{ background:`${T.purple}0d`, border:`1px solid ${T.purple}40`, borderRadius:8, padding:14 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
+              <div style={{ flex:1, minWidth:200 }}>
+                <div style={{ fontSize:12.5, fontWeight:700, color:T.purple, marginBottom:3 }}>🔍 Extrage date din desen PDF</div>
+                <div style={{ fontSize:11, color:T.textDim, lineHeight:1.5 }}>
+                  Citește automat dimensiuni, filete, material și cantitate. Funcționează și pe desene fără text (OCR).
+                </div>
+              </div>
+              <label className="btn" style={{ background:T.purple, color:"#fff", padding:"9px 16px", borderRadius:7, fontSize:12, fontWeight:600, cursor: extracting ? "wait" : "pointer", opacity: extracting ? 0.6 : 1 }}>
+                {extracting ? "Se procesează…" : "📄 Selectează PDF"}
+                <input type="file" accept=".pdf" disabled={!!extracting} onChange={e => handleExtract(e.target.files[0])} style={{ display:"none" }} />
+              </label>
+            </div>
+
+            {/* PROGRESS */}
+            {extracting && (
+              <div style={{ marginTop:12 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:T.textMuted, marginBottom:5 }}>
+                  <span>{extracting.msg}</span><span>{extracting.pct}%</span>
+                </div>
+                <div style={{ height:5, background:T.border, borderRadius:3, overflow:"hidden" }}>
+                  <div style={{ width:`${extracting.pct}%`, height:"100%", background:T.purple, borderRadius:3, transition:"width .3s ease" }} />
+                </div>
+              </div>
+            )}
+
+            {/* REZULTATE EXTRASE */}
+            {extracted && (
+              <div style={{ marginTop:12, background:T.bgInput, border:`1px solid ${T.border}`, borderRadius:7, padding:14 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                  <span style={{ fontSize:12, fontWeight:700, color:T.text }}>📋 DATE EXTRASE
+                    <span style={{ marginLeft:8, fontSize:10, background: extracted.method==="ocr" ? `${T.warning}22` : `${T.success}22`, color: extracted.method==="ocr" ? T.warning : T.success, padding:"2px 7px", borderRadius:4, fontWeight:600 }}>
+                      {extracted.method === "ocr" ? "OCR" : "TEXT PDF"}
+                    </span>
+                  </span>
+                  <button className="btn" onClick={()=>setExtracted(null)} style={{ background:"none", color:T.textFaint, fontSize:14, padding:0 }}>✕</button>
+                </div>
+
+                <div style={{ display:"flex", flexDirection:"column", gap:7, fontSize:12 }}>
+                  {extracted.denumire && <ExtRow label="Denumire" val={extracted.denumire} T={T} />}
+                  {extracted.nrDesen && <ExtRow label="Nr. desen" val={extracted.nrDesen} T={T} />}
+                  {extracted.material && <ExtRow label="Material" val={extracted.material} ok T={T} />}
+                  {extracted.cantitate && <ExtRow label="Cantitate" val={`${extracted.cantitate} buc`} ok T={T} />}
+                  {extracted.dimensiuni.filter(d=>d.tip==="diam").length > 0 &&
+                    <ExtRow label="Diametre" val={extracted.dimensiuni.filter(d=>d.tip==="diam").map(d=>`Ø${d.valoare}${d.toleranta?` ${d.toleranta}`:""}`).join(", ")} T={T} />}
+                  {extracted.filete.length > 0 &&
+                    <ExtRow label="Filete" val={extracted.filete.map(f=>`${f.nr}× ${f.tip}`).join(", ")} ok T={T} />}
+                  {extracted.toleranteStranse && <ExtRow label="Toleranțe" val="Strânse (H7/h6) detectate" ok T={T} />}
+                  {extracted.scara && <ExtRow label="Scară" val={extracted.scara} T={T} />}
+                  {extracted.dimensiuni.length === 0 && extracted.filete.length === 0 && !extracted.material &&
+                    <div style={{ fontSize:11, color:T.textFaint, fontStyle:"italic", padding:"4px 0" }}>Nu s-au putut identifica date structurate. Verifică textul brut sau introdu manual.</div>}
+                </div>
+
+                <button className="btn" onClick={applyExtracted} style={{ width:"100%", justifyContent:"center", marginTop:12, background:T.purple, color:"#fff", padding:"9px 0", borderRadius:6, fontSize:12, fontWeight:600 }}>
+                  ✓ Aplică automat în formular
+                </button>
+                <div style={{ fontSize:10, color:T.textFaint, textAlign:"center", marginTop:6 }}>
+                  Verifică valorile după aplicare — extragerea automată poate avea erori
+                </div>
+              </div>
+            )}
+          </div>
+
           <Atasamente atasamente={f.atasamente||[]} setAtasamente={(a)=>s("atasamente",a)} T={T} />
         </div>
 
         {/* DREAPTA — calcul în timp real */}
         <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-          <div className="card" style={{ padding:18, background:"linear-gradient(180deg,#0f1117,#0c1622)", border:"1px solid #1d4ed8" }}>
+          <div className="card" style={{ padding:18, background:`linear-gradient(180deg,${T.bgPanel},${T.accent}08)`, border:`1px solid ${T.accent}66` }}>
             <div style={{ fontSize:11, color:T.accent, letterSpacing:".7px", fontWeight:700, marginBottom:14 }}>📊 ESTIMARE AUTOMATĂ</div>
-            {est && est.volCM3 > 0 ? <>
-              <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
-                <Row label="Volum piesă"     val={`${est.volCM3.toFixed(1)} cm³`} T={T} />
-                <Row label="Masă material"   val={`${est.masaKg.toFixed(3)} kg`} T={T} />
-                <Row label="Timp estimat"    val={`${Math.round(est.timpMin)} min · ${(est.timpMin/60).toFixed(2)} h`} highlight T={T} />
-                <Row label="Tarif aplicat"   val={`${est.tarif} €/h (${cat?.name.split(" ")[0]})`} T={T} />
-                <Row label="Complexitate"    val={`×${cpl?.mult.toFixed(2)} (${cpl?.label})`} T={T} />
+            {est && est.volBrutCM3 > 0 ? <>
+              <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:12 }}>
+                <Row label={isCilindric ? `Volum bară (Ø${f.dBrut}×${f.lBrut})` : `Volum brut (${f.L}×${f.l}×${f.h})`} val={`${est.volBrutCM3.toFixed(1)} cm³`} T={T} />
+                <Row label="Masă material brut" val={`${est.masaBrutKg.toFixed(3)} kg`} T={T} />
+                <Row label={`Volum îndepărtat (${est.procIndep.toFixed(0)}%)`} val={`${est.volIndepCM3.toFixed(1)} cm³`} T={T} />
+                <Row label="Volum piesă finită" val={`${est.volFinCM3.toFixed(1)} cm³ (${est.masaFinKg.toFixed(3)} kg)`} T={T} />
               </div>
-              <div style={{ height:1, background:T.border, margin:"10px -18px 14px" }} />
+              <div style={{ height:1, background:T.border, margin:"6px -18px 12px" }} />
+              <div style={{ display:"flex", flexDirection:"column", gap:7, marginBottom:12 }}>
+                <Row label="Setup (programare+prindere)" val={`${est.setupMin.toFixed(0)} min`} T={T} />
+                <Row label="Prelucrare propriu-zisă" val={`${est.timpPrelucrareMin.toFixed(1)} min`} T={T} />
+                {est.timpGauri > 0 && <Row label={`Găuri filetate (${f.nrGauri}× ${f.filetGauri})`} val={`${est.timpGauri.toFixed(1)} min`} T={T} />}
+                {est.timpAlezaj > 0 && <Row label="Alezaj precis" val={`${est.timpAlezaj} min`} T={T} />}
+                <Row label="TIMP TOTAL" val={`${Math.round(est.timpMin)} min · ${(est.timpMin/60).toFixed(2)} h`} highlight T={T} />
+                <Row label="Tarif aplicat" val={`${est.tarif} €/h`} T={T} />
+              </div>
+              <div style={{ height:1, background:T.border, margin:"6px -18px 12px" }} />
               <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
-                <Row label="Cost manoperă"      val={fmtE(est.costMano)} T={T} />
-                <Row label="Cost material (+40% risipă)" val={fmtE(est.costMat)} T={T} />
+                <Row label="Cost manoperă" val={fmtE(est.costMano)} T={T} />
+                <Row label={`Cost material (×${est.factorRisipa.toFixed(2)})`} val={fmtE(est.costMat)} T={T} />
                 <Row label={`Marjă profit ${tarife.marja}%`} val={fmtE(est.pretBaza * tarife.marja/100)} T={T} />
               </div>
               <div style={{ height:1, background:T.border, margin:"12px -18px" }} />
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                <span style={{ fontSize:12, color:T.textMuted }}>PREȚ ESTIMAT / BUC:</span>
-                <span style={{ fontSize:20, fontWeight:700, color:T.success, fontFamily:"'IBM Plex Sans',sans-serif" }}>{fmtE(est.pretBuc)}</span>
+                <span style={{ fontSize:12, color:T.textMuted, fontWeight:600 }}>PREȚ / BUC:</span>
+                <span style={{ fontSize:22, fontWeight:800, color:T.success, letterSpacing:"-.02em" }}>{fmtE(est.pretBuc)}</span>
               </div>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:6 }}>
                 <span style={{ fontSize:11, color:T.textDim }}>Total {f.qty} buc:</span>
-                <span style={{ fontSize:13, fontWeight:600, color:T.accent }}>{fmtE(est.pretTotal)}</span>
+                <span style={{ fontSize:14, fontWeight:700, color:T.accent }}>{fmtE(est.pretTotal)}</span>
               </div>
             </> : <div style={{ fontSize:12, color:T.textDim, textAlign:"center", padding:"20px 0" }}>Introduceți dimensiuni pentru estimare</div>}
           </div>
@@ -1270,8 +1714,11 @@ function SubOfertaNou({ oferta, clienti, materiale, categorii, tarife, onSave, o
             )}
           </div>
 
-          <div style={{ background:T.bgPanel, border:"1px solid #1a2035", borderRadius:8, padding:14, fontSize:11, color:T.textDim, lineHeight:1.7 }}>
-            💡 <b style={{ color:T.textMuted }}>Cum funcționează:</b> Calculatorul folosește volumul piesei × coeficient categorie ÷ MRR material pentru a estima timpul, apoi aplică tariful tău, costul materialului și marja de profit.
+          <div style={{ background:T.bgPanel, border:`1px solid ${T.border}`, borderRadius:8, padding:14, fontSize:11, color:T.textDim, lineHeight:1.7 }}>
+            💡 <b style={{ color:T.textMuted }}>Cum funcționează:</b><br/>
+            <b>Volum brut</b> = bară/bloc pornire (clientul plătește materialul brut).<br/>
+            <b>Volum îndepărtat</b> = % din brut → determină timpul de prelucrare.<br/>
+            <b>Operații extra</b> se adaugă la timpul de bază.
           </div>
 
           <button className="btn" onClick={save} style={{ background:T.accentHover, color:"#fff", padding:"12px 18px", borderRadius:8, fontSize:13, fontWeight:600, justifyContent:"center" }}>
@@ -1288,6 +1735,15 @@ function Row({ label, val, highlight, T }) {
     <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
       <span style={{ fontSize:11, color:T.textDim }}>{label}:</span>
       <span style={{ fontSize:12, color: highlight ? T.accent : T.textMuted, fontWeight: highlight ? 700 : 500 }}>{val}</span>
+    </div>
+  );
+}
+
+function ExtRow({ label, val, ok, T }) {
+  return (
+    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:10 }}>
+      <span style={{ fontSize:11, color:T.textDim, flexShrink:0 }}>{label}:</span>
+      <span style={{ fontSize:12, color: ok ? T.success : T.textMuted, fontWeight: ok ? 700 : 500, textAlign:"right", overflow:"hidden", textOverflow:"ellipsis" }}>{ok && "✓ "}{val}</span>
     </div>
   );
 }
