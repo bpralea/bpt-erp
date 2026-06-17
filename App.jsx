@@ -1245,6 +1245,146 @@ function parseDrawingText(text) {
 }
 
 // Helper: aplică datele extrase peste form
+// ─── AUTO-CLASIFICARE PIESĂ pe baza datelor extrase ──────────────────────────
+// Returnează: { catId, complexId, dBrut, lBrut, L, l, h, procIndep, nrGauri, filetGauri,
+//              aleazjPrecis, tolerantaStr, matId, qty, numePiesa, confidence: {field: 0-1} }
+function autoClassifyPiece(extracted, materiale, categorii) {
+  const conf = {}; // încredere pe fiecare câmp
+  const result = {
+    catId: 1, complexId: "mediu",
+    dBrut: 0, lBrut: 0, L: 0, l: 0, h: 0,
+    procIndep: 35,
+    nrGauri: 0, filetGauri: "M8",
+    aleazjPrecis: false, tolerantaStr: false,
+    matId: 1, qty: 1, numePiesa: "",
+    confidence: conf,
+  };
+
+  const diametre = extracted.dimensiuni.filter(d => d.tip === "diam").map(d => d.valoare);
+  const arediam = diametre.length > 0;
+  const nrGauriTotale = extracted.filete.reduce((s, f) => s + f.nr, 0);
+  const hasAlezPrec = extracted.dimensiuni.some(d => d.toleranta && /[Hh][67]/.test(d.toleranta));
+
+  // ─── DETERMINĂ CATEGORIA ──────────────────────────────────────────────────
+  if (arediam && diametre.length >= 1) {
+    // Are diametre → e cilindrică/strunjită
+    if (nrGauriTotale > 0 || hasAlezPrec) {
+      // Cu găuri filetate sau alezaj precis → "Piese combinate" (strung + frezare)
+      result.catId = 6;
+      conf.catId = 0.85;
+    } else if (diametre.length >= 3 || hasAlezPrec) {
+      // Cu multe trepte sau toleranțe → strunjit complex
+      result.catId = 2;
+      conf.catId = 0.75;
+    } else {
+      // Strunjit simplu
+      result.catId = 1;
+      conf.catId = 0.80;
+    }
+  } else {
+    // Fără diametre → e prismatică/frezată
+    if (nrGauriTotale > 4 || hasAlezPrec) {
+      // Carcasă complexă
+      result.catId = 4;
+      conf.catId = 0.65;
+    } else {
+      // Placă plană
+      result.catId = 3;
+      conf.catId = 0.65;
+    }
+  }
+
+  // ─── DIMENSIUNI ──────────────────────────────────────────────────────────
+  const cat = categorii.find(c => c.id === result.catId);
+  const isCilindric = cat && ["strung","strungCNC","combo"].includes(cat.tip);
+
+  if (isCilindric && arediam) {
+    // Pentru piese cilindrice: diametrul cel mai mare → bară +10mm
+    const maxDiam = Math.max(...diametre);
+    result.dBrut = Math.ceil((maxDiam + 10) / 5) * 5;
+    conf.dBrut = 0.90;
+    // Lungimea = dacă găsim dimensiuni lineare mari (>20mm care nu sunt diametre)
+    // E mai greu de determinat - punem o estimare implicită
+    result.lBrut = Math.max(50, Math.round(maxDiam * 0.7)); // estimare conservativă
+    conf.lBrut = 0.30; // INCERTITUDINE - utilizatorul trebuie să verifice
+  } else {
+    // Pentru piese frezate
+    // Folosim cele mai mari 3 dimensiuni lineare
+    const liniare = extracted.dimensiuni
+      .filter(d => d.tip !== "diam")
+      .map(d => d.valoare)
+      .sort((a, b) => b - a);
+    if (liniare.length >= 3) {
+      [result.L, result.l, result.h] = liniare.slice(0, 3);
+      conf.L = conf.l = conf.h = 0.60;
+    } else {
+      result.L = 100; result.l = 80; result.h = 30;
+      conf.L = conf.l = conf.h = 0.20; // INCERT
+    }
+  }
+
+  // ─── PROCENT ÎNDEPĂRTAT ───────────────────────────────────────────────────
+  if (result.catId === 4) { result.procIndep = 55; conf.procIndep = 0.55; }
+  else if (result.catId === 5) { result.procIndep = 50; conf.procIndep = 0.55; }
+  else if (result.catId === 2) { result.procIndep = 40; conf.procIndep = 0.60; }
+  else if (result.catId === 6) { result.procIndep = 35; conf.procIndep = 0.65; }
+  else if (result.catId === 1) { result.procIndep = 30; conf.procIndep = 0.60; }
+  else { result.procIndep = 25; conf.procIndep = 0.55; }
+
+  // ─── MATERIAL ────────────────────────────────────────────────────────────
+  if (extracted.material) {
+    const mat = materiale.find(m => m.name === extracted.material);
+    if (mat) { result.matId = mat.id; conf.matId = 0.95; }
+  } else {
+    conf.matId = 0.20; // INCERT - default Al
+  }
+
+  // ─── CANTITATE ────────────────────────────────────────────────────────────
+  if (extracted.cantitate && extracted.cantitate > 0 && extracted.cantitate < 10000) {
+    result.qty = extracted.cantitate; conf.qty = 0.90;
+  } else { conf.qty = 0.30; }
+
+  // ─── FILETE ──────────────────────────────────────────────────────────────
+  if (extracted.filete.length > 0) {
+    result.nrGauri = nrGauriTotale;
+    const sorted = [...extracted.filete].sort((a,b) => b.nr - a.nr);
+    if (sorted[0]) result.filetGauri = sorted[0].tip;
+    conf.nrGauri = 0.85;
+    conf.filetGauri = 0.85;
+  }
+
+  // ─── TOLERANȚE / ALEZAJ ──────────────────────────────────────────────────
+  if (hasAlezPrec) { result.aleazjPrecis = true; conf.aleazjPrecis = 0.90; }
+  else if (extracted.toleranteStranse) { result.tolerantaStr = true; conf.tolerantaStr = 0.75; }
+
+  // ─── COMPLEXITATE (după număr operații extra) ────────────────────────────
+  let scor = 0;
+  if (nrGauriTotale > 0) scor += nrGauriTotale * 0.5;
+  if (hasAlezPrec) scor += 2;
+  if (extracted.toleranteStranse) scor += 1.5;
+  if (diametre.length > 3) scor += 1;
+
+  if (scor >= 6) { result.complexId = "complex"; conf.complexId = 0.70; }
+  else if (scor >= 3) { result.complexId = "mediu"; conf.complexId = 0.65; }
+  else { result.complexId = "simplu"; conf.complexId = 0.65; }
+
+  // ─── NUME PIESĂ ──────────────────────────────────────────────────────────
+  if (extracted.denumire && extracted.nrDesen) {
+    result.numePiesa = `${extracted.denumire} (${extracted.nrDesen})`;
+    conf.numePiesa = 0.90;
+  } else if (extracted.denumire) {
+    result.numePiesa = extracted.denumire; conf.numePiesa = 0.85;
+  } else if (extracted.nrDesen) {
+    result.numePiesa = extracted.nrDesen; conf.numePiesa = 0.80;
+  } else { conf.numePiesa = 0; }
+
+  // Calculează încrederea generală
+  const vals = Object.values(conf).filter(v => typeof v === "number");
+  conf._overall = vals.length ? vals.reduce((a,b) => a+b, 0) / vals.length : 0;
+
+  return result;
+}
+
 function applyExtractedData(extracted, currentForm, materiale) {
   const f = { ...currentForm };
 
@@ -1398,11 +1538,23 @@ function calcEstimare(f, categorii, materiale, tarife) {
 }
 
 function TabOfertare({ oferte, setOferte, clienti, materiale, setMateriale, categorii, tarife, setTarife, setComenzi, comenzi, showToast, setTab, T }) {
-  const [view, setView] = useState("lista"); // lista | nou | tarife
+  const [view, setView] = useState("lista"); // lista | nou | multi | tarife
   const [editOferta, setEditOferta] = useState(null);
 
+  const saveMulti = (o) => {
+    if (o.id) { setOferte(p => p.map(x => x.id === o.id ? o : x)); showToast("Ofertă actualizată ✓"); }
+    else { setOferte(p => [...p, { ...o, id: uid(), nr: `OF-${new Date().getFullYear()}-${String(p.length+1).padStart(3,"0")}`, data: new Date().toISOString().slice(0,10), status: "draft" }]); showToast(`Ofertă cu ${o.repere?.length||0} repere salvată ✓`); }
+    setView("lista"); setEditOferta(null);
+  };
+
+  // Detectează tipul ofertei la editare
+  const isMultiReper = editOferta && Array.isArray(editOferta.repere) && editOferta.repere.length > 0;
+
   if (view === "tarife") return <SubTarife tarife={tarife} setTarife={setTarife} materiale={materiale} setMateriale={setMateriale} onBack={()=>setView("lista")} showToast={showToast} T={T} />;
-  if (view === "nou" || editOferta) return <SubOfertaNou oferta={editOferta} clienti={clienti} materiale={materiale} categorii={categorii} tarife={tarife} T={T}
+
+  if (view === "multi" || (editOferta && isMultiReper)) return <SubOfertaMulti oferta={editOferta} clienti={clienti} materiale={materiale} categorii={categorii} tarife={tarife} T={T} onSave={saveMulti} onClose={() => { setView("lista"); setEditOferta(null); }} />;
+
+  if (view === "nou" || (editOferta && !isMultiReper)) return <SubOfertaNou oferta={editOferta} clienti={clienti} materiale={materiale} categorii={categorii} tarife={tarife} T={T}
     onSave={(o) => {
       if (o.id) { setOferte(p => p.map(x => x.id === o.id ? o : x)); showToast("Ofertă actualizată ✓"); }
       else { setOferte(p => [...p, { ...o, id: uid(), nr: `OF-${new Date().getFullYear()}-${String(p.length+1).padStart(3,"0")}`, data: new Date().toISOString().slice(0,10), status: "draft" }]); showToast("Ofertă salvată ✓"); }
@@ -1443,8 +1595,9 @@ function TabOfertare({ oferte, setOferte, clienti, materiale, setMateriale, cate
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
       <PH title="Ofertare" sub="Calculator automat de preț pentru piese custom" T={T}>
         <div style={{ display:"flex", gap:8 }}>
-          <button className="btn" onClick={()=>setView("tarife")} style={{ background:T.border, color:T.textMuted, padding:"8px 14px", borderRadius:6, fontSize:12 }}>⚙ Tarife & Materiale</button>
-          <button className="btn" onClick={()=>setView("nou")} style={{ background:T.accentHover, color:"#fff", padding:"8px 16px", borderRadius:6, fontSize:12, fontWeight:600 }}>+ Ofertă nouă</button>
+          <button className="btn" onClick={()=>setView("tarife")} style={{ background:T.border, color:T.textMuted, padding:"8px 14px", borderRadius:6, fontSize:12 }}>⚙ Tarife</button>
+          <button className="btn" onClick={()=>setView("nou")} style={{ background:T.bgHover, color:T.textMuted, padding:"8px 14px", borderRadius:6, fontSize:12, fontWeight:600 }}>+ Mono-reper</button>
+          <button className="btn" onClick={()=>setView("multi")} style={{ background:T.accentHover, color:"#fff", padding:"8px 16px", borderRadius:6, fontSize:12, fontWeight:600 }}>📦 Multi-reper</button>
         </div>
       </PH>
 
@@ -1475,29 +1628,42 @@ function TabOfertare({ oferte, setOferte, clienti, materiale, setMateriale, cate
             {oferte.map(o => {
               const cl = clienti.find(x=>x.id===o.clientId)||{};
               const statusColor = { draft:T.textDim, trimisa:T.warning, acceptata:T.success, refuzata:T.danger }[o.status]||T.textDim;
+              const isMulti = Array.isArray(o.repere) && o.repere.length > 0;
+              const totalRepere = isMulti ? o.repere.length : 1;
+              const totalQty = isMulti ? o.repere.reduce((s,r) => s + (r.qty||1), 0) : (o.qty || 1);
+              const totalVal = isMulti ? o.repere.reduce((s,r) => s + (r.pretTotal||0), 0) : (o.pretTotal || 0);
+              const numePrincipal = isMulti
+                ? (o.titluOferta || `${totalRepere} repere`)
+                : (o.numePiesa || "piesă custom");
               return (
                 <tr key={o.id} className="tr" style={{ borderBottom:"1px solid #0f1117" }}>
-                  <td style={{ padding:"10px 14px", color:T.accent, fontWeight:600 }}>{o.nr}</td>
+                  <td style={{ padding:"10px 14px", color:T.accent, fontWeight:600 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                      {isMulti && <span title="Ofertă multi-reper" style={{ fontSize:11 }}>📦</span>}
+                      {o.nr}
+                    </div>
+                  </td>
                   <td style={{ padding:"10px 14px", color:T.textMuted }}>{cl.name||"—"}</td>
                   <td style={{ padding:"10px 14px", color:T.textMuted }}>
                     <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                      <span>{o.numePiesa||"piesă custom"}</span>
-                      {o.atasamente && o.atasamente.length > 0 && (
-                        <span title={`${o.atasamente.length} atașamente`} style={{ fontSize:10, background:"rgba(139,92,246,.12)", color:T.purple, padding:"1px 6px", borderRadius:3, fontWeight:600 }}>📎 {o.atasamente.length}</span>
+                      <span>{numePrincipal}</span>
+                      {isMulti && <span style={{ fontSize:10, background:T.accent+"20", color:T.accent, padding:"1px 6px", borderRadius:3, fontWeight:600 }}>{totalRepere} rep.</span>}
+                      {!isMulti && o.atasamente && o.atasamente.length > 0 && (
+                        <span title={`${o.atasamente.length} atașamente`} style={{ fontSize:10, background:T.purple+"20", color:T.purple, padding:"1px 6px", borderRadius:3, fontWeight:600 }}>📎 {o.atasamente.length}</span>
                       )}
                     </div>
                   </td>
-                  <td style={{ padding:"10px 14px", color:T.textDim, fontSize:11 }}>{o.material||"—"}</td>
-                  <td style={{ padding:"10px 14px", color:T.textMuted }}>{o.qty}</td>
-                  <td style={{ padding:"10px 14px", color:T.textMuted }}>{fmtE(o.pretBuc||0)}</td>
-                  <td style={{ padding:"10px 14px", color:T.success, fontWeight:600 }}>{fmtE(o.pretTotal||0)}</td>
+                  <td style={{ padding:"10px 14px", color:T.textDim, fontSize:11 }}>{isMulti ? "—" : (o.material||"—")}</td>
+                  <td style={{ padding:"10px 14px", color:T.textMuted }}>{totalQty}</td>
+                  <td style={{ padding:"10px 14px", color:T.textMuted }}>{isMulti ? "—" : fmtE(o.pretBuc||0)}</td>
+                  <td style={{ padding:"10px 14px", color:T.success, fontWeight:600 }}>{fmtE(totalVal)}</td>
                   <td style={{ padding:"10px 14px" }}>
                     <span className="tag" style={{ background:statusColor+"18", color:statusColor, border:`1px solid ${statusColor}35` }}>{(o.status||"draft").toUpperCase()}</span>
                   </td>
                   <td style={{ padding:"10px 14px" }}>
                     <div style={{ display:"flex", gap:5 }}>
                       <button className="btn" onClick={()=>setEditOferta(o)} style={{ background:T.border, color:T.textMuted, padding:"5px 9px", borderRadius:5, fontSize:11 }}>✎</button>
-                      {o.status!=="acceptata" && <button className="btn" onClick={()=>convertToComanda(o)} title="Convertește în comandă" style={{ background:"rgba(16,185,129,.1)", color:T.success, padding:"5px 9px", borderRadius:5, fontSize:11, border:"1px solid rgba(16,185,129,.2)" }}>→ CMD</button>}
+                      {!isMulti && o.status!=="acceptata" && <button className="btn" onClick={()=>convertToComanda(o)} title="Convertește în comandă" style={{ background:"rgba(16,185,129,.1)", color:T.success, padding:"5px 9px", borderRadius:5, fontSize:11, border:"1px solid rgba(16,185,129,.2)" }}>→ CMD</button>}
                       <button className="btn" onClick={()=>{ if(confirm("Ștergi oferta?")){ setOferte(p=>p.filter(x=>x.id!==o.id)); showToast("Ofertă ștearsă"); }}} style={{ background:"rgba(239,68,68,.1)", color:T.danger, padding:"5px 9px", borderRadius:5, fontSize:11 }}>✕</button>
                     </div>
                   </td>
@@ -1512,6 +1678,358 @@ function TabOfertare({ oferte, setOferte, clienti, materiale, setMateriale, cate
 }
 
 // ─── SUB: Formular Ofertă Nouă cu calcul în timp real ────────────────────────
+// ─── SUB: Ofertă MULTI-REPER (pachet de PDF-uri procesate în lot) ─────────────
+function SubOfertaMulti({ oferta, clienti, materiale, categorii, tarife, T, onSave, onClose }) {
+  const [f, setF] = useState(oferta || {
+    clientId: clienti[0]?.id || 1,
+    titluOferta: "",
+    repere: [],         // [{ id, numePiesa, catId, matId, complexId, dBrut, lBrut, L, l, h, qty, procIndep, nrGauri, filetGauri, aleazjPrecis, tolerantaStr, overridePret, obs, atasament, confidence, est }]
+    obs: "",
+  });
+  const [processing, setProcessing] = useState(null); // {current, total, msg, pct}
+  const [editReper, setEditReper] = useState(null);
+
+  // Procesează un PDF: extrage + clasifică + calculează preț
+  const processOneFile = async (file, idx, total) => {
+    setProcessing({ current: idx+1, total, msg: `${file.name}: pregătire…`, pct: 5 });
+    const onProg = (p) => setProcessing({ current: idx+1, total, msg: `${file.name}: ${p.msg}`, pct: p.pct });
+
+    let extracted;
+    try {
+      const { text, method } = await extractFromPDF(file, onProg);
+      extracted = parseDrawingText(text);
+      extracted.method = method;
+    } catch (err) {
+      console.error("Eroare extragere:", err);
+      extracted = { dimensiuni: [], filete: [], material: null, cantitate: null, denumire: null, nrDesen: null, toleranteStranse: false, raw: "" };
+    }
+
+    // Auto-clasificare
+    const cls = autoClassifyPiece(extracted, materiale, categorii);
+
+    // Citește atașamentul ca base64 pentru salvare
+    let atasament = null;
+    if (file.size <= 5 * 1024 * 1024) {
+      try {
+        const reader = new FileReader();
+        atasament = await new Promise((res, rej) => {
+          reader.onload = (e) => res({ name: file.name, size: file.size, type: file.type, ext: file.name.split(".").pop().toLowerCase(), dataUrl: e.target.result, stored: true, addedAt: new Date().toISOString() });
+          reader.onerror = () => rej();
+          reader.readAsDataURL(file);
+        });
+      } catch {}
+    }
+
+    // Construiește reperul
+    const reper = {
+      id: uid(),
+      numePiesa: cls.numePiesa || file.name.replace(/\.pdf$/i, ""),
+      ...cls,
+      obs: "",
+      overridePret: null,
+      atasament,
+    };
+    // Calculează prețul
+    const est = calcEstimare(reper, categorii, materiale, tarife);
+    if (est) {
+      reper.pretBuc = est.pretBuc;
+      reper.pretTotal = est.pretTotal;
+      reper.timpMin = est.timpMin;
+      reper.material = est.mat?.name;
+      reper.categorie = est.cat?.name;
+    }
+    return reper;
+  };
+
+  const handleFiles = async (fileList) => {
+    const pdfs = Array.from(fileList).filter(f => f.name.toLowerCase().endsWith(".pdf"));
+    if (pdfs.length === 0) { alert("Selectați fișiere PDF"); return; }
+    setProcessing({ current: 0, total: pdfs.length, msg: "Start procesare…", pct: 0 });
+
+    const noi = [];
+    for (let i = 0; i < pdfs.length; i++) {
+      try {
+        const r = await processOneFile(pdfs[i], i, pdfs.length);
+        noi.push(r);
+      } catch (err) {
+        console.error(`Eroare la ${pdfs[i].name}:`, err);
+      }
+    }
+    setF(p => ({ ...p, repere: [...p.repere, ...noi] }));
+    setProcessing(null);
+  };
+
+  const removeReper = (id) => {
+    if (!confirm("Ștergi reperul?")) return;
+    setF(p => ({ ...p, repere: p.repere.filter(r => r.id !== id) }));
+  };
+
+  // Recalculează prețul pentru un reper după modificare
+  const saveReper = (modifiedReper) => {
+    const est = calcEstimare(modifiedReper, categorii, materiale, tarife);
+    const updated = {
+      ...modifiedReper,
+      pretBuc: modifiedReper.overridePret != null ? modifiedReper.overridePret : (est?.pretBuc || 0),
+      pretTotal: (modifiedReper.overridePret != null ? modifiedReper.overridePret : (est?.pretBuc || 0)) * (modifiedReper.qty || 1),
+      timpMin: est?.timpMin,
+      material: est?.mat?.name,
+      categorie: est?.cat?.name,
+    };
+    setF(p => ({ ...p, repere: p.repere.map(r => r.id === updated.id ? updated : r) }));
+    setEditReper(null);
+  };
+
+  const totalGeneral = f.repere.reduce((s,r) => s + (r.pretTotal || 0), 0);
+  const totalBuc = f.repere.reduce((s,r) => s + (r.qty || 1), 0);
+
+  const save = () => {
+    if (f.repere.length === 0) { alert("Adăugați cel puțin un reper"); return; }
+    onSave({ ...f, pretTotal: totalGeneral });
+  };
+
+  // Editare reper individual
+  if (editReper) {
+    return <SubReperEdit reper={editReper} clienti={clienti} materiale={materiale} categorii={categorii} tarife={tarife} T={T}
+      onSave={saveReper} onClose={() => setEditReper(null)} />;
+  }
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+      <PH title={oferta ? `Editare ${oferta.nr}` : "Ofertă multi-reper"} sub="Încarcă mai multe desene PDF — fiecare devine un reper cu preț propriu" T={T}>
+        <button className="btn" onClick={onClose} style={{ background:T.border, color:T.textMuted, padding:"8px 14px", borderRadius:6, fontSize:12 }}>← Înapoi</button>
+      </PH>
+
+      {/* HEADER OFERTĂ */}
+      <div className="card" style={{ padding:18 }}>
+        <div className="grid-2-cols">
+          <div><Lbl T={T}>Client</Lbl><select className="inp" value={f.clientId} onChange={e=>setF(p=>({...p,clientId:Number(e.target.value)}))}>{clienti.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+          <div><Lbl T={T}>Titlu ofertă (opțional)</Lbl><input className="inp" value={f.titluOferta} onChange={e=>setF(p=>({...p,titluOferta:e.target.value}))} placeholder="ex: Pachet piese flanșe + axe" /></div>
+        </div>
+      </div>
+
+      {/* ZONA DE UPLOAD PDF-uri */}
+      <div className="card" style={{ padding:18, background:`${T.purple}08`, border:`1px dashed ${T.purple}55` }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:14, flexWrap:"wrap" }}>
+          <div style={{ flex:1, minWidth:220 }}>
+            <div style={{ fontSize:13.5, fontWeight:700, color:T.purple, marginBottom:4 }}>📦 Încarcă mai multe desene PDF</div>
+            <div style={{ fontSize:11.5, color:T.textDim, lineHeight:1.5 }}>
+              Fiecare PDF va fi citit automat (text + OCR), clasificat și inserat ca reper cu preț estimat. Verifică marcajele de incertitudine apoi editează individual unde e nevoie.
+            </div>
+          </div>
+          <label className="btn" style={{ background:T.purple, color:"#fff", padding:"10px 18px", borderRadius:7, fontSize:13, fontWeight:600, cursor: processing ? "wait" : "pointer", opacity: processing ? 0.6 : 1 }}>
+            {processing ? "Se procesează…" : "📄 Selectează PDF-uri"}
+            <input type="file" accept=".pdf" multiple disabled={!!processing} onChange={e => handleFiles(e.target.files)} style={{ display:"none" }} />
+          </label>
+        </div>
+
+        {processing && (
+          <div style={{ marginTop:14 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:T.textMuted, marginBottom:5 }}>
+              <span>Reper {processing.current}/{processing.total}: {processing.msg}</span>
+              <span>{processing.pct}%</span>
+            </div>
+            <div style={{ height:6, background:T.border, borderRadius:3, overflow:"hidden" }}>
+              <div style={{ width:`${processing.pct}%`, height:"100%", background:T.purple, borderRadius:3, transition:"width .3s ease" }} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* TOTAL */}
+      {f.repere.length > 0 && (
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 20px", background:`${T.success}10`, border:`1px solid ${T.success}40`, borderRadius:8 }}>
+          <div>
+            <div style={{ fontSize:11, color:T.textDim, letterSpacing:".5px", fontWeight:600 }}>TOTAL OFERTĂ</div>
+            <div style={{ fontSize:11, color:T.textFaint, marginTop:2 }}>{f.repere.length} repere · {totalBuc} buc</div>
+          </div>
+          <div style={{ fontSize:26, fontWeight:800, color:T.success, letterSpacing:"-.02em" }}>{fmtE(totalGeneral)}</div>
+        </div>
+      )}
+
+      {/* LISTA REPERE */}
+      {f.repere.length > 0 && (
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          <div style={{ fontSize:11, color:T.textDim, letterSpacing:".5px", fontWeight:600, marginBottom:4 }}>REPERE ({f.repere.length})</div>
+          {f.repere.map((r, idx) => {
+            const conf = r.confidence?._overall || 0;
+            const isLowConf = conf < 0.55;
+            const cat = categorii.find(c => c.id === r.catId);
+            const mat = materiale.find(m => m.id === r.matId);
+            return (
+              <div key={r.id} className="card" style={{ padding:14, borderLeft:`3px solid ${isLowConf ? T.warning : T.success}` }}>
+                <div style={{ display:"flex", gap:12, alignItems:"flex-start", flexWrap:"wrap" }}>
+                  <div style={{ background:T.bgInput, color:T.textMuted, borderRadius:6, padding:"4px 10px", fontSize:13, fontWeight:700, minWidth:32, textAlign:"center" }}>#{idx+1}</div>
+                  <div style={{ flex:1, minWidth:180 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:6 }}>
+                      <span style={{ fontSize:13.5, fontWeight:700, color:T.text }}>{r.numePiesa}</span>
+                      {isLowConf && <span title="Date incerte - verificați manual" style={{ fontSize:10, background:`${T.warning}22`, color:T.warning, padding:"2px 7px", borderRadius:4, fontWeight:600 }}>⚠ VERIFICĂ</span>}
+                      <span style={{ fontSize:10, background:T.accent+"15", color:T.accent, padding:"2px 7px", borderRadius:4, fontWeight:600 }}>{cat?.icon} {cat?.name.split("(")[0].trim()}</span>
+                      {r.atasament && <span style={{ fontSize:10, background:T.purple+"15", color:T.purple, padding:"2px 7px", borderRadius:4, fontWeight:600 }}>📎 PDF</span>}
+                    </div>
+                    <div style={{ fontSize:11.5, color:T.textDim, lineHeight:1.5 }}>
+                      {mat?.name} · {r.qty} buc · {Math.round(r.timpMin||0)} min/buc
+                      {r.nrGauri > 0 && ` · ${r.nrGauri}× ${r.filetGauri}`}
+                      {r.aleazjPrecis && " · H7"}
+                    </div>
+                  </div>
+                  <div style={{ textAlign:"right", minWidth:120 }}>
+                    <div style={{ fontSize:11, color:T.textFaint }}>{fmtE(r.pretBuc||0)}/buc</div>
+                    <div style={{ fontSize:16, fontWeight:700, color:T.success, marginTop:2 }}>{fmtE(r.pretTotal||0)}</div>
+                  </div>
+                  <div style={{ display:"flex", gap:5, alignItems:"center" }}>
+                    <button className="btn" onClick={() => setEditReper(r)} style={{ background:T.accentHover, color:"#fff", padding:"6px 12px", borderRadius:5, fontSize:11, fontWeight:600 }}>✎ Editare</button>
+                    <button className="btn" onClick={() => removeReper(r.id)} style={{ background:`${T.danger}15`, color:T.danger, padding:"6px 9px", borderRadius:5, fontSize:12 }}>✕</button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {f.repere.length === 0 && !processing && (
+        <div style={{ padding:"40px 20px", textAlign:"center", color:T.textFaint, fontSize:13 }}>
+          Niciun reper încă. Încarcă desenele PDF folosind butonul mov de mai sus.
+        </div>
+      )}
+
+      {/* OBSERVAȚII OFERTĂ */}
+      {f.repere.length > 0 && (
+        <div className="card" style={{ padding:16 }}>
+          <Lbl T={T}>Observații generale ofertă</Lbl>
+          <textarea className="inp" rows={2} value={f.obs} onChange={e=>setF(p=>({...p,obs:e.target.value}))} placeholder="ex: Termen livrare 6 săptămâni, transport FCA…" style={{ resize:"vertical", fontFamily:"inherit" }} />
+        </div>
+      )}
+
+      <div style={{ display:"flex", justifyContent:"flex-end", gap:10 }}>
+        <button className="btn" onClick={onClose} style={{ background:T.border, color:T.textMuted, padding:"10px 18px", borderRadius:7, fontSize:13 }}>Anulează</button>
+        <button className="btn" onClick={save} disabled={f.repere.length === 0} style={{ background:T.repere?.length === 0 ? T.border : T.accentHover, color:"#fff", padding:"10px 22px", borderRadius:7, fontSize:13, fontWeight:600, opacity: f.repere.length === 0 ? 0.5 : 1 }}>
+          ✓ Salvează oferta ({fmtE(totalGeneral)})
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── SUB: Editare reper individual din ofertă multi-reper ────────────────────
+function SubReperEdit({ reper, clienti, materiale, categorii, tarife, T, onSave, onClose }) {
+  const [f, setF] = useState(reper);
+  const s = (k,v) => setF(p => ({ ...p, [k]: v }));
+  const est = calcEstimare(f, categorii, materiale, tarife);
+  const isCilindric = est?.isCilindric;
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+      <PH title={`Editare reper: ${f.numePiesa}`} sub="Ajustează datele pentru recalcul automat" T={T}>
+        <button className="btn" onClick={onClose} style={{ background:T.border, color:T.textMuted, padding:"8px 14px", borderRadius:6, fontSize:12 }}>← Înapoi la ofertă</button>
+      </PH>
+
+      <div className="grid-oferta">
+        <div className="card" style={{ padding:20, display:"flex", flexDirection:"column", gap:14 }}>
+          <div className="grid-2-cols">
+            <div style={{ gridColumn:"1 / -1" }}><Lbl T={T}>Denumire reper</Lbl><input className="inp" value={f.numePiesa} onChange={e=>s("numePiesa",e.target.value)} /></div>
+            <div><Lbl T={T}>Cantitate</Lbl><input className="inp" type="number" min={1} value={f.qty} onChange={e=>s("qty",Number(e.target.value)||1)} /></div>
+            <div><Lbl T={T}>Material</Lbl><select className="inp" value={f.matId} onChange={e=>s("matId",Number(e.target.value))}>{materiale.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></div>
+          </div>
+
+          <div><Lbl T={T}>Categorie</Lbl>
+            <select className="inp" value={f.catId} onChange={e=>s("catId",Number(e.target.value))}>
+              {categorii.map(c=><option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}
+            </select>
+          </div>
+
+          {isCilindric ? (
+            <div className="grid-2-cols">
+              <div><Lbl T={T}>Ø bară (mm)</Lbl><input className="inp" type="number" min={1} value={f.dBrut} onChange={e=>s("dBrut",Number(e.target.value)||0)} /></div>
+              <div><Lbl T={T}>Lungime bară (mm)</Lbl><input className="inp" type="number" min={1} value={f.lBrut} onChange={e=>s("lBrut",Number(e.target.value)||0)} /></div>
+            </div>
+          ) : (
+            <div className="grid-3-cols">
+              <div><Lbl T={T}>L (mm)</Lbl><input className="inp" type="number" min={1} value={f.L} onChange={e=>s("L",Number(e.target.value)||0)} /></div>
+              <div><Lbl T={T}>l (mm)</Lbl><input className="inp" type="number" min={1} value={f.l} onChange={e=>s("l",Number(e.target.value)||0)} /></div>
+              <div><Lbl T={T}>h (mm)</Lbl><input className="inp" type="number" min={1} value={f.h} onChange={e=>s("h",Number(e.target.value)||0)} /></div>
+            </div>
+          )}
+
+          <div>
+            <Lbl T={T}>Procent material îndepărtat: <b style={{ color:T.accent }}>{f.procIndep}%</b></Lbl>
+            <input type="range" min={5} max={90} step={5} value={f.procIndep} onChange={e=>s("procIndep",Number(e.target.value))} style={{ width:"100%", accentColor:T.accent }} />
+          </div>
+
+          <div className="grid-2-cols">
+            <div><Lbl T={T}>Complexitate</Lbl>
+              <div style={{ display:"flex", gap:5 }}>
+                {COMPLEXITATI.map(c=>(
+                  <button key={c.id} className="btn" onClick={()=>s("complexId",c.id)} style={{ flex:1, padding:"7px 0", borderRadius:5, fontSize:11, justifyContent:"center", background: f.complexId===c.id ? c.color+"22" : T.bgInput, color: f.complexId===c.id ? c.color : T.textFaint, border:`1px solid ${f.complexId===c.id ? c.color+"66" : T.border}`, fontWeight:600 }}>{c.label}</button>
+                ))}
+              </div>
+            </div>
+            <div className="grid-2-cols">
+              <div><Lbl T={T}>Nr. găuri</Lbl><input className="inp" type="number" min={0} value={f.nrGauri} onChange={e=>s("nrGauri",Number(e.target.value)||0)} /></div>
+              <div><Lbl T={T}>Filet</Lbl><select className="inp" value={f.filetGauri} onChange={e=>s("filetGauri",e.target.value)}>{["M5","M6","M8","M10","M12","M14","M16"].map(t=><option key={t}>{t}</option>)}</select></div>
+            </div>
+          </div>
+
+          <div className="grid-2-cols">
+            <label style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 12px", background:T.bgInput, border:`1px solid ${T.border}`, borderRadius:6, cursor:"pointer", fontSize:12, color:T.textMuted }}>
+              <input type="checkbox" checked={f.aleazjPrecis} onChange={e=>s("aleazjPrecis",e.target.checked)} style={{ accentColor:T.accent }} />
+              Alezaj precis (H7/h7)
+            </label>
+            <label style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 12px", background:T.bgInput, border:`1px solid ${T.border}`, borderRadius:6, cursor:"pointer", fontSize:12, color:T.textMuted }}>
+              <input type="checkbox" checked={f.tolerantaStr} onChange={e=>s("tolerantaStr",e.target.checked)} style={{ accentColor:T.accent }} />
+              Toleranțe strânse
+            </label>
+          </div>
+
+          <div><Lbl T={T}>Observații reper</Lbl><textarea className="inp" rows={2} value={f.obs} onChange={e=>s("obs",e.target.value)} style={{ resize:"vertical", fontFamily:"inherit" }} /></div>
+        </div>
+
+        {/* DREAPTA - calcul */}
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          <div className="card" style={{ padding:18, background:`linear-gradient(180deg,${T.bgPanel},${T.accent}08)`, border:`1px solid ${T.accent}55` }}>
+            <div style={{ fontSize:11, color:T.accent, letterSpacing:".7px", fontWeight:700, marginBottom:12 }}>📊 ESTIMARE</div>
+            {est && est.volBrutCM3 > 0 ? <>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                <Row label="Timp total" val={`${Math.round(est.timpMin)} min`} highlight T={T} />
+                <Row label="Cost manoperă" val={fmtE(est.costMano)} T={T} />
+                <Row label="Cost material" val={fmtE(est.costMat)} T={T} />
+                <Row label={`Marjă ${tarife.marja}%`} val={fmtE(est.pretBaza * tarife.marja/100)} T={T} />
+              </div>
+              <div style={{ height:1, background:T.border, margin:"12px -18px" }} />
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <span style={{ fontSize:12, color:T.textMuted, fontWeight:600 }}>PREȚ / BUC:</span>
+                <span style={{ fontSize:20, fontWeight:800, color:T.success }}>{fmtE(est.pretBuc)}</span>
+              </div>
+              <div style={{ display:"flex", justifyContent:"space-between", marginTop:4 }}>
+                <span style={{ fontSize:11, color:T.textDim }}>Total {f.qty} buc:</span>
+                <span style={{ fontSize:14, fontWeight:700, color:T.accent }}>{fmtE(est.pretTotal)}</span>
+              </div>
+            </> : <div style={{ fontSize:12, color:T.textDim, textAlign:"center", padding:"20px 0" }}>Introduceți dimensiuni</div>}
+          </div>
+
+          <div className="card" style={{ padding:14 }}>
+            <Lbl T={T}>Ajustare manuală preț/buc</Lbl>
+            <div style={{ display:"flex", gap:6 }}>
+              <input className="inp" type="number" min={0} value={f.overridePret ?? ""} onChange={e=>s("overridePret", e.target.value === "" ? null : Number(e.target.value))} placeholder={`Auto: ${(est?.pretBuc||0).toFixed(2)} €`} />
+              {f.overridePret != null && <button className="btn" onClick={()=>s("overridePret",null)} style={{ background:T.border, color:T.textMuted, padding:"0 10px", borderRadius:5, fontSize:11 }}>↻</button>}
+            </div>
+          </div>
+
+          {f.confidence?._overall && f.confidence._overall < 0.55 && (
+            <div style={{ background:`${T.warning}10`, border:`1px solid ${T.warning}40`, borderRadius:7, padding:12, fontSize:11, color:T.warning }}>
+              ⚠ Date extrase cu încredere scăzută ({(f.confidence._overall*100).toFixed(0)}%). Verifică dimensiunile, materialul și cantitatea.
+            </div>
+          )}
+
+          <button className="btn" onClick={() => onSave(f)} style={{ background:T.accentHover, color:"#fff", padding:"11px 18px", borderRadius:7, fontSize:13, fontWeight:600, justifyContent:"center" }}>
+            ✓ Salvează reper
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SubOfertaNou({ oferta, clienti, materiale, categorii, tarife, onSave, onClose, T }) {
   const [f, setF] = useState(oferta || {
     clientId: clienti[0]?.id || 1,
