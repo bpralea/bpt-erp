@@ -1138,6 +1138,100 @@ async function extractFromPDF(file, onProgress) {
   return { text: result.data.text, method: "ocr" };
 }
 
+// ─── EXTRAGERE CU AI VISION (Claude prin backend Vercel) ─────────────────────
+// Trimite PDF-ul rendat ca imagine la /api/extract-drawing și primește JSON structurat
+async function extractWithAI(file, onProgress) {
+  onProgress?.({ stage: "loading", msg: "Se pregătește desenul…", pct: 5 });
+
+  // Randează PDF-ul ca imagine PNG la rezoluție bună
+  const pdfjsLib = await loadPdfJs();
+  const buffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+
+  onProgress?.({ stage: "rendering", msg: "Conversie PDF → imagine…", pct: 20 });
+  const page = await pdf.getPage(1);
+  const viewport = page.getViewport({ scale: 2.0 });
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  // Fundal alb pentru desen
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  // Comprimă imaginea la JPEG pentru transfer mai rapid (sau PNG cu calitate)
+  const imageBase64 = canvas.toDataURL("image/png");
+  // Verifică mărimea - dacă e prea mare, refacem cu scale mai mic
+  const sizeMB = (imageBase64.length * 0.75) / (1024 * 1024);
+  let finalBase64 = imageBase64;
+  if (sizeMB > 4) {
+    onProgress?.({ stage: "rendering", msg: "Optimizare imagine…", pct: 30 });
+    const viewport2 = page.getViewport({ scale: 1.4 });
+    canvas.width = viewport2.width;
+    canvas.height = viewport2.height;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport: viewport2 }).promise;
+    finalBase64 = canvas.toDataURL("image/png");
+  }
+
+  onProgress?.({ stage: "ai", msg: "Analiză AI desen tehnic…", pct: 50 });
+
+  // Apel către funcția serverless Vercel
+  const response = await fetch("/api/extract-drawing", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imageBase64: finalBase64,
+      model: "claude-haiku-4-5",
+    }),
+  });
+
+  onProgress?.({ stage: "ai", msg: "Se procesează răspunsul…", pct: 85 });
+
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}));
+    throw new Error(errData.error || `Eroare server: ${response.status}`);
+  }
+
+  const data = await response.json();
+  if (!data.success) {
+    throw new Error(data.error || "Răspuns invalid de la AI");
+  }
+
+  onProgress?.({ stage: "done", msg: `AI a finalizat (${data.meta?.durationMs}ms)`, pct: 100 });
+
+  // Convertește formatul AI în formatul intern al aplicației
+  const ai = data.extracted;
+  const result = {
+    dimensiuni: [],
+    filete: ai.filete || [],
+    material: ai.material || null,
+    cantitate: ai.cantitate || null,
+    scara: ai.scara || null,
+    denumire: ai.denumire || null,
+    nrDesen: ai.nrDesen || null,
+    toleranteStranse: ai.tolerantaStransa || false,
+    aiData: ai, // păstrăm și formatul AI complet pentru clasificare directă
+    meta: data.meta,
+    raw: JSON.stringify(ai, null, 2),
+  };
+
+  // Adaugă diametrele cu tag "diam"
+  (ai.diametre || []).forEach(d => {
+    result.dimensiuni.push({ valoare: d.valoare, tip: "diam", toleranta: d.toleranta, rol: d.rol });
+  });
+  // Adaugă lineare
+  (ai.lineare || []).forEach(l => {
+    result.dimensiuni.push({ valoare: l.valoare, tip: "linear", toleranta: null, rol: l.rol });
+  });
+
+  return result;
+}
+
+
+
 // Parse text extras → date structurate
 function parseDrawingText(text) {
   const result = {
@@ -1248,7 +1342,7 @@ function parseDrawingText(text) {
 // ─── AUTO-CLASIFICARE PIESĂ pe baza datelor extrase ──────────────────────────
 // Returnează: { catId, complexId, dBrut, lBrut, L, l, h, procIndep, nrGauri, filetGauri,
 //              aleazjPrecis, tolerantaStr, matId, qty, numePiesa, confidence: {field: 0-1} }
-function autoClassifyPiece(extracted, materiale, categorii) {
+function autoClassifyPiece(extracted, materiale, categorii, fileName) {
   const conf = {}; // încredere pe fiecare câmp
   const result = {
     catId: 1, complexId: "mediu",
@@ -1261,103 +1355,131 @@ function autoClassifyPiece(extracted, materiale, categorii) {
   };
 
   const diametre = extracted.dimensiuni.filter(d => d.tip === "diam").map(d => d.valoare);
-  const arediam = diametre.length > 0;
+  const liniare  = extracted.dimensiuni.filter(d => d.tip !== "diam").map(d => d.valoare);
+  const arediam  = diametre.length > 0;
+  const arelin   = liniare.length > 0;
+  const aredata  = arediam || arelin || extracted.material || extracted.filete.length > 0;
   const nrGauriTotale = extracted.filete.reduce((s, f) => s + f.nr, 0);
   const hasAlezPrec = extracted.dimensiuni.some(d => d.toleranta && /[Hh][67]/.test(d.toleranta));
 
   // ─── DETERMINĂ CATEGORIA ──────────────────────────────────────────────────
   if (arediam && diametre.length >= 1) {
-    // Are diametre → e cilindrică/strunjită
     if (nrGauriTotale > 0 || hasAlezPrec) {
-      // Cu găuri filetate sau alezaj precis → "Piese combinate" (strung + frezare)
-      result.catId = 6;
-      conf.catId = 0.85;
+      result.catId = 6; conf.catId = 0.85;  // Combinate
     } else if (diametre.length >= 3 || hasAlezPrec) {
-      // Cu multe trepte sau toleranțe → strunjit complex
-      result.catId = 2;
-      conf.catId = 0.75;
+      result.catId = 2; conf.catId = 0.75;  // Strunjit complex
     } else {
-      // Strunjit simplu
-      result.catId = 1;
-      conf.catId = 0.80;
+      result.catId = 1; conf.catId = 0.80;  // Strunjit simplu
+    }
+  } else if (arelin) {
+    // Fără diametre dar cu cote lineare → frezată
+    if (nrGauriTotale > 4 || hasAlezPrec) {
+      result.catId = 4; conf.catId = 0.65;  // Carcase
+    } else {
+      result.catId = 3; conf.catId = 0.65;  // Plăci
     }
   } else {
-    // Fără diametre → e prismatică/frezată
-    if (nrGauriTotale > 4 || hasAlezPrec) {
-      // Carcasă complexă
-      result.catId = 4;
-      conf.catId = 0.65;
-    } else {
-      // Placă plană
-      result.catId = 3;
-      conf.catId = 0.65;
-    }
+    // ZERO date extrase - alegem o categorie SIMPLĂ și marcăm cu încredere foarte mică
+    // Folosim hash din numele fișierului ca să avem variabilitate
+    const seed = (fileName || "").split("").reduce((s,c) => s + c.charCodeAt(0), 0);
+    result.catId = [1, 3, 6][seed % 3]; // alternează între strunjit, frezat, combinat
+    conf.catId = 0.10; // FOARTE INCERT
   }
 
-  // ─── DIMENSIUNI ──────────────────────────────────────────────────────────
   const cat = categorii.find(c => c.id === result.catId);
   const isCilindric = cat && ["strung","strungCNC","combo"].includes(cat.tip);
 
-  if (isCilindric && arediam) {
-    // Pentru piese cilindrice: diametrul cel mai mare → bară +10mm
-    const maxDiam = Math.max(...diametre);
-    result.dBrut = Math.ceil((maxDiam + 10) / 5) * 5;
-    conf.dBrut = 0.90;
-    // Lungimea = dacă găsim dimensiuni lineare mari (>20mm care nu sunt diametre)
-    // E mai greu de determinat - punem o estimare implicită
-    result.lBrut = Math.max(50, Math.round(maxDiam * 0.7)); // estimare conservativă
-    conf.lBrut = 0.30; // INCERTITUDINE - utilizatorul trebuie să verifice
-  } else {
-    // Pentru piese frezate
-    // Folosim cele mai mari 3 dimensiuni lineare
-    const liniare = extracted.dimensiuni
-      .filter(d => d.tip !== "diam")
-      .map(d => d.valoare)
-      .sort((a, b) => b - a);
-    if (liniare.length >= 3) {
-      [result.L, result.l, result.h] = liniare.slice(0, 3);
-      conf.L = conf.l = conf.h = 0.60;
+  // ─── DIMENSIUNI ──────────────────────────────────────────────────────────
+  if (isCilindric) {
+    if (arediam) {
+      const maxDiam = Math.max(...diametre);
+      result.dBrut = Math.ceil((maxDiam + 10) / 5) * 5;
+      conf.dBrut = 0.90;
+      // Lungime: dacă avem cote lineare, ia cea mai mare
+      if (arelin) {
+        result.lBrut = Math.max(...liniare);
+        conf.lBrut = 0.70;
+      } else {
+        result.lBrut = Math.max(40, Math.round(maxDiam * 0.7));
+        conf.lBrut = 0.35;
+      }
+    } else if (arelin) {
+      // Cilindric dar fără diametre extrase: deducem din lineare
+      const sorted = [...liniare].sort((a,b) => b-a);
+      result.dBrut = sorted[0] || 50;
+      result.lBrut = sorted[1] || sorted[0]*0.7 || 40;
+      conf.dBrut = 0.30; conf.lBrut = 0.30;
     } else {
-      result.L = 100; result.l = 80; result.h = 30;
-      conf.L = conf.l = conf.h = 0.20; // INCERT
+      // ZERO date: variabilitate per nume fișier
+      const seed = (fileName || "").split("").reduce((s,c) => s + c.charCodeAt(0), 0);
+      const dims = [
+        { d: 40, l: 35 }, { d: 50, l: 45 }, { d: 60, l: 50 },
+        { d: 80, l: 60 }, { d: 100, l: 80 }, { d: 90, l: 65 },
+      ];
+      const pick = dims[seed % dims.length];
+      result.dBrut = pick.d; result.lBrut = pick.l;
+      conf.dBrut = 0.10; conf.lBrut = 0.10;
+    }
+  } else {
+    // FREZAT
+    if (arelin && liniare.length >= 3) {
+      const sorted = [...liniare].sort((a,b) => b-a);
+      [result.L, result.l, result.h] = sorted.slice(0, 3);
+      conf.L = conf.l = conf.h = 0.60;
+    } else if (arelin && liniare.length > 0) {
+      const sorted = [...liniare].sort((a,b) => b-a);
+      result.L = sorted[0]; result.l = sorted[1] || sorted[0]*0.6; result.h = sorted[2] || sorted[0]*0.3;
+      conf.L = 0.55; conf.l = 0.40; conf.h = 0.30;
+    } else {
+      // ZERO date: variabilitate per nume fișier
+      const seed = (fileName || "").split("").reduce((s,c) => s + c.charCodeAt(0), 0);
+      const dims = [
+        { L: 80, l: 60, h: 20 }, { L: 100, l: 80, h: 30 }, { L: 150, l: 100, h: 40 },
+        { L: 200, l: 150, h: 50 }, { L: 120, l: 90, h: 25 }, { L: 90, l: 70, h: 35 },
+      ];
+      const pick = dims[seed % dims.length];
+      result.L = pick.L; result.l = pick.l; result.h = pick.h;
+      conf.L = conf.l = conf.h = 0.10;
     }
   }
 
   // ─── PROCENT ÎNDEPĂRTAT ───────────────────────────────────────────────────
-  if (result.catId === 4) { result.procIndep = 55; conf.procIndep = 0.55; }
-  else if (result.catId === 5) { result.procIndep = 50; conf.procIndep = 0.55; }
-  else if (result.catId === 2) { result.procIndep = 40; conf.procIndep = 0.60; }
-  else if (result.catId === 6) { result.procIndep = 35; conf.procIndep = 0.65; }
-  else if (result.catId === 1) { result.procIndep = 30; conf.procIndep = 0.60; }
-  else { result.procIndep = 25; conf.procIndep = 0.55; }
+  if (result.catId === 4) { result.procIndep = 55; conf.procIndep = aredata ? 0.55 : 0.20; }
+  else if (result.catId === 5) { result.procIndep = 50; conf.procIndep = aredata ? 0.55 : 0.20; }
+  else if (result.catId === 2) { result.procIndep = 40; conf.procIndep = aredata ? 0.60 : 0.20; }
+  else if (result.catId === 6) { result.procIndep = 35; conf.procIndep = aredata ? 0.65 : 0.20; }
+  else if (result.catId === 1) { result.procIndep = 30; conf.procIndep = aredata ? 0.60 : 0.20; }
+  else { result.procIndep = 25; conf.procIndep = aredata ? 0.55 : 0.20; }
 
   // ─── MATERIAL ────────────────────────────────────────────────────────────
   if (extracted.material) {
     const mat = materiale.find(m => m.name === extracted.material);
     if (mat) { result.matId = mat.id; conf.matId = 0.95; }
   } else {
-    conf.matId = 0.20; // INCERT - default Al
+    // Material implicit: oțel (mai des întâlnit decât Al în atelierele CNC)
+    const otel = materiale.find(m => /S235|OL37/.test(m.name));
+    if (otel) result.matId = otel.id;
+    conf.matId = 0.15;
   }
 
   // ─── CANTITATE ────────────────────────────────────────────────────────────
   if (extracted.cantitate && extracted.cantitate > 0 && extracted.cantitate < 10000) {
     result.qty = extracted.cantitate; conf.qty = 0.90;
-  } else { conf.qty = 0.30; }
+  } else { conf.qty = 0.20; }
 
   // ─── FILETE ──────────────────────────────────────────────────────────────
   if (extracted.filete.length > 0) {
     result.nrGauri = nrGauriTotale;
     const sorted = [...extracted.filete].sort((a,b) => b.nr - a.nr);
     if (sorted[0]) result.filetGauri = sorted[0].tip;
-    conf.nrGauri = 0.85;
-    conf.filetGauri = 0.85;
+    conf.nrGauri = 0.85; conf.filetGauri = 0.85;
   }
 
   // ─── TOLERANȚE / ALEZAJ ──────────────────────────────────────────────────
   if (hasAlezPrec) { result.aleazjPrecis = true; conf.aleazjPrecis = 0.90; }
   else if (extracted.toleranteStranse) { result.tolerantaStr = true; conf.tolerantaStr = 0.75; }
 
-  // ─── COMPLEXITATE (după număr operații extra) ────────────────────────────
+  // ─── COMPLEXITATE ────────────────────────────────────────────────────────
   let scor = 0;
   if (nrGauriTotale > 0) scor += nrGauriTotale * 0.5;
   if (hasAlezPrec) scor += 2;
@@ -1366,7 +1488,7 @@ function autoClassifyPiece(extracted, materiale, categorii) {
 
   if (scor >= 6) { result.complexId = "complex"; conf.complexId = 0.70; }
   else if (scor >= 3) { result.complexId = "mediu"; conf.complexId = 0.65; }
-  else { result.complexId = "simplu"; conf.complexId = 0.65; }
+  else { result.complexId = "simplu"; conf.complexId = aredata ? 0.65 : 0.30; }
 
   // ─── NUME PIESĂ ──────────────────────────────────────────────────────────
   if (extracted.denumire && extracted.nrDesen) {
@@ -1376,11 +1498,153 @@ function autoClassifyPiece(extracted, materiale, categorii) {
     result.numePiesa = extracted.denumire; conf.numePiesa = 0.85;
   } else if (extracted.nrDesen) {
     result.numePiesa = extracted.nrDesen; conf.numePiesa = 0.80;
+  } else if (fileName) {
+    // Folosește numele fișierului fără extensie
+    result.numePiesa = fileName.replace(/\.pdf$/i, "").replace(/[_-]/g, " ");
+    conf.numePiesa = 0.40;
   } else { conf.numePiesa = 0; }
 
   // Calculează încrederea generală
   const vals = Object.values(conf).filter(v => typeof v === "number");
   conf._overall = vals.length ? vals.reduce((a,b) => a+b, 0) / vals.length : 0;
+
+  return result;
+}
+
+// ─── CONVERSIE DATE AI → CLASIFICARE PIESĂ (încredere ridicată) ──────────────
+function aiDataToClassification(ai, materiale, categorii, fileName) {
+  const conf = { _overall: 0.92 }; // încredere mare - AI a returnat date
+  const result = {
+    catId: 1, complexId: ai.complexitate || "mediu",
+    dBrut: 0, lBrut: 0, L: 0, l: 0, h: 0,
+    procIndep: ai.procIndepartat || 35,
+    nrGauri: 0, filetGauri: "M8",
+    aleazjPrecis: !!ai.alezajPrecis,
+    tolerantaStr: !!ai.tolerantaStransa,
+    matId: 1, qty: ai.cantitate || 1,
+    numePiesa: "",
+    confidence: conf,
+  };
+
+  // CATEGORIA - din "categoria" AI sau dedusă din tipPiesa
+  const catMap = {
+    strunjit_simplu: 1, strunjit_complex: 2,
+    placa_frezata: 3, carcasa_3d: 4,
+    dispozitiv: 5, combinata: 6,
+  };
+  if (ai.categoria && catMap[ai.categoria]) {
+    result.catId = catMap[ai.categoria];
+    conf.catId = 0.92;
+  } else if (ai.tipPiesa === "cilindric") {
+    result.catId = (ai.filete?.length > 0 || ai.alezajPrecis) ? 6 : 1;
+    conf.catId = 0.80;
+  } else {
+    result.catId = (ai.filete?.length > 4 || ai.alezajPrecis) ? 4 : 3;
+    conf.catId = 0.75;
+  }
+
+  const cat = categorii.find(c => c.id === result.catId);
+  const isCilindric = cat && ["strung","strungCNC","combo"].includes(cat.tip);
+
+  // DIMENSIUNI - din AI direct
+  if (isCilindric) {
+    if (ai.barRecomandata?.diametru) {
+      result.dBrut = ai.barRecomandata.diametru;
+      result.lBrut = ai.barRecomandata.lungime || 50;
+      conf.dBrut = conf.lBrut = 0.92;
+    } else {
+      // Folosește diametrul maxim
+      const diam = (ai.diametre || []).map(d => d.valoare);
+      if (diam.length > 0) {
+        result.dBrut = Math.ceil((Math.max(...diam) + 10) / 5) * 5;
+        conf.dBrut = 0.85;
+      }
+      // Lungime din lineare
+      const lin = (ai.lineare || []).map(l => l.valoare);
+      if (lin.length > 0) {
+        const lungimePiesa = (ai.lineare || []).find(l => l.rol === "lungime_piesa");
+        result.lBrut = lungimePiesa?.valoare || Math.max(...lin);
+        conf.lBrut = 0.80;
+      }
+    }
+  } else {
+    // FREZAT - cele mai mari 3 lineare
+    const lin = (ai.lineare || []).map(l => l.valoare).sort((a,b) => b-a);
+    if (lin.length >= 3) {
+      [result.L, result.l, result.h] = lin.slice(0, 3);
+      conf.L = conf.l = conf.h = 0.85;
+    } else if (lin.length > 0) {
+      result.L = lin[0];
+      result.l = lin[1] || Math.round(lin[0] * 0.6);
+      result.h = lin[2] || Math.round(lin[0] * 0.3);
+      conf.L = 0.80; conf.l = conf.h = 0.50;
+    }
+  }
+
+  // MATERIAL
+  if (ai.material) {
+    const mat = materiale.find(m =>
+      m.name.toLowerCase().includes(ai.material.toLowerCase()) ||
+      ai.material.toLowerCase().includes(m.name.toLowerCase())
+    );
+    if (mat) {
+      result.matId = mat.id;
+      conf.matId = 0.95;
+    } else {
+      // Încearcă potrivire parțială pe cuvinte cheie
+      const aim = ai.material.toLowerCase();
+      let matched = null;
+      if (/s235|st\s*37|ol\s*37/.test(aim)) matched = materiale.find(m => m.id === 3);
+      else if (/c45|olc\s*45/.test(aim)) matched = materiale.find(m => m.id === 4);
+      else if (/42crmo/.test(aim)) matched = materiale.find(m => m.id === 5);
+      else if (/6061|alumin/.test(aim)) matched = materiale.find(m => m.id === 1);
+      else if (/7075/.test(aim)) matched = materiale.find(m => m.id === 2);
+      else if (/304|1\.4301/.test(aim)) matched = materiale.find(m => m.id === 6);
+      else if (/316|1\.4404/.test(aim)) matched = materiale.find(m => m.id === 7);
+      else if (/pom|delrin/.test(aim)) matched = materiale.find(m => m.id === 8);
+      else if (/pa6|nylon/.test(aim)) matched = materiale.find(m => m.id === 9);
+      else if (/peek/.test(aim)) matched = materiale.find(m => m.id === 10);
+      if (matched) { result.matId = matched.id; conf.matId = 0.85; }
+      else { conf.matId = 0.40; }
+    }
+  } else { conf.matId = 0.20; }
+
+  // CANTITATE
+  conf.qty = ai.cantitate ? 0.95 : 0.30;
+
+  // FILETE
+  if (ai.filete && ai.filete.length > 0) {
+    result.nrGauri = ai.filete.reduce((s,f) => s + (f.nr || 1), 0);
+    const sorted = [...ai.filete].sort((a,b) => (b.nr||1) - (a.nr||1));
+    if (sorted[0]) result.filetGauri = sorted[0].tip;
+    conf.nrGauri = conf.filetGauri = 0.92;
+  }
+
+  conf.aleazjPrecis = ai.alezajPrecis !== undefined ? 0.92 : 0.30;
+  conf.tolerantaStr = ai.tolerantaStransa !== undefined ? 0.85 : 0.30;
+  conf.complexId = ai.complexitate ? 0.85 : 0.40;
+  conf.procIndep = ai.procIndepartat ? 0.80 : 0.40;
+
+  // NUME PIESĂ
+  if (ai.denumire && ai.nrDesen) {
+    result.numePiesa = `${ai.denumire} (${ai.nrDesen})`;
+    conf.numePiesa = 0.95;
+  } else if (ai.denumire) {
+    result.numePiesa = ai.denumire; conf.numePiesa = 0.92;
+  } else if (ai.nrDesen) {
+    result.numePiesa = ai.nrDesen; conf.numePiesa = 0.88;
+  } else if (fileName) {
+    result.numePiesa = fileName.replace(/\.pdf$/i, "").replace(/[_-]/g, " ");
+    conf.numePiesa = 0.40;
+  } else { conf.numePiesa = 0; }
+
+  // Recalculează încrederea generală
+  const vals = Object.values(conf).filter(v => typeof v === "number" && v > 0);
+  if (vals.length > 1) {
+    // exclude _overall din medie
+    const valsNoOverall = vals.filter((_, i) => Object.keys(conf)[i] !== "_overall");
+    conf._overall = valsNoOverall.length ? valsNoOverall.reduce((a,b) => a+b, 0) / valsNoOverall.length : 0.5;
+  }
 
   return result;
 }
@@ -1695,17 +1959,40 @@ function SubOfertaMulti({ oferta, clienti, materiale, categorii, tarife, T, onSa
     const onProg = (p) => setProcessing({ current: idx+1, total, msg: `${file.name}: ${p.msg}`, pct: p.pct });
 
     let extracted;
+    let usedMethod = "ai";
+    let aiError = null;
+
+    // PAS 1: Încearcă AI Vision (Claude)
     try {
-      const { text, method } = await extractFromPDF(file, onProg);
-      extracted = parseDrawingText(text);
-      extracted.method = method;
+      extracted = await extractWithAI(file, onProg);
+      extracted.method = "ai";
     } catch (err) {
-      console.error("Eroare extragere:", err);
-      extracted = { dimensiuni: [], filete: [], material: null, cantitate: null, denumire: null, nrDesen: null, toleranteStranse: false, raw: "" };
+      aiError = err.message || String(err);
+      console.warn(`AI extraction failed for ${file.name}:`, aiError);
+
+      // PAS 2: Fallback la OCR + parsing regex
+      try {
+        onProg({ stage: "fallback", msg: "AI eșuat, încerc OCR…", pct: 10 });
+        const { text, method } = await extractFromPDF(file, onProg);
+        extracted = parseDrawingText(text);
+        extracted.method = method;
+        usedMethod = "fallback";
+      } catch (err2) {
+        console.error("OCR fallback also failed:", err2);
+        extracted = { dimensiuni: [], filete: [], material: null, cantitate: null, denumire: null, nrDesen: null, toleranteStranse: false, raw: "", method: "none" };
+        usedMethod = "none";
+      }
     }
 
-    // Auto-clasificare
-    const cls = autoClassifyPiece(extracted, materiale, categorii);
+    // Auto-clasificare (sau folosește direct datele AI dacă există)
+    let cls;
+    if (extracted.aiData) {
+      // AI a returnat date structurate complete - le folosim direct
+      cls = aiDataToClassification(extracted.aiData, materiale, categorii, file.name);
+    } else {
+      // Fallback - folosim clasificarea bazată pe regex
+      cls = autoClassifyPiece(extracted, materiale, categorii, file.name);
+    }
 
     // Citește atașamentul ca base64 pentru salvare
     let atasament = null;
@@ -1725,9 +2012,12 @@ function SubOfertaMulti({ oferta, clienti, materiale, categorii, tarife, T, onSa
       id: uid(),
       numePiesa: cls.numePiesa || file.name.replace(/\.pdf$/i, ""),
       ...cls,
-      obs: "",
+      obs: extracted.aiData?.observatii || "",
       overridePret: null,
       atasament,
+      _extractionMethod: extracted.method,
+      _aiMeta: extracted.meta,
+      _aiError: aiError,
     };
     // Calculează prețul
     const est = calcEstimare(reper, categorii, materiale, tarife);
